@@ -1,0 +1,11 @@
+[toolchain]
+channel = "stable"
+targets = [
+    # iOS
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+
+    # macOS
+    "aarch64-apple-darwin",
+]
+components = ["clippy", "rustfmt"]
