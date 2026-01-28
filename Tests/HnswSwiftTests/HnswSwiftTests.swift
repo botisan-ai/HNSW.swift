@@ -159,3 +159,53 @@ import Testing
     #expect(results.count == 2)
     #expect(results[0].id == 10)
 }
+
+@Test func testDeleteTombstones() async throws {
+    let index = HnswIndex(
+        maxConnections: 16,
+        maxElements: 1000,
+        maxLayers: 16,
+        efConstruction: 200,
+        dimension: 2,
+        distanceType: .l2
+    )
+
+    try await index.insert(vector: [1.0, 0.0], id: 0)
+    try await index.insert(vector: [0.0, 1.0], id: 1)
+    try await index.insert(vector: [1.0, 1.0], id: 2)
+
+    await index.delete(id: 1)
+
+    #expect(try await index.count() == 2)
+
+    let results = try await index.search(query: [0.0, 1.0], k: 2)
+    #expect(results.allSatisfy { $0.id != 1 })
+}
+
+@Test func testCompactClearsTombstones() async throws {
+    let index = HnswIndex(
+        maxConnections: 16,
+        maxElements: 1000,
+        maxLayers: 16,
+        efConstruction: 200,
+        dimension: 2,
+        distanceType: .l2
+    )
+
+    try await index.insert(vector: [1.0, 0.0], id: 0)
+    try await index.insert(vector: [0.0, 1.0], id: 1)
+    try await index.insert(vector: [1.0, 1.0], id: 2)
+    try await index.insert(vector: [-1.0, 0.0], id: 3)
+
+    await index.delete(ids: [1, 3])
+    #expect(try await index.count() == 2)
+
+    try await index.compact()
+    #expect(try await index.count() == 2)
+
+    let results = try await index.search(query: [1.0, 0.0], k: 3)
+    #expect(results.allSatisfy { $0.id != 1 && $0.id != 3 })
+
+    await index.delete(id: 0)
+    #expect(try await index.count() == 1)
+}

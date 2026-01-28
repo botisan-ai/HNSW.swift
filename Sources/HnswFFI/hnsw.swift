@@ -532,7 +532,9 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 
-public protocol HnswIndexCosineProtocol: AnyObject, Sendable {
+public protocol HnswIndexProtocol: AnyObject, Sendable {
+    
+    func compact(deletedIds: [UInt64], config: HnswIndexConfig) throws  -> HnswIndex
     
     func getDimension()  -> UInt32
     
@@ -551,7 +553,7 @@ public protocol HnswIndexCosineProtocol: AnyObject, Sendable {
     func setSearchingMode(enabled: Bool) throws 
     
 }
-open class HnswIndexCosine: HnswIndexCosineProtocol, @unchecked Sendable {
+open class HnswIndex: HnswIndexProtocol, @unchecked Sendable {
     fileprivate let handle: UInt64
 
     /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
@@ -588,49 +590,55 @@ open class HnswIndexCosine: HnswIndexCosineProtocol, @unchecked Sendable {
     @_documentation(visibility: private)
 #endif
     public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_hnsw_fn_clone_hnswindexcosine(self.handle, $0) }
+        return try! rustCall { uniffi_hnsw_fn_clone_hnswindex(self.handle, $0) }
     }
-public convenience init(maxNbConnection: UInt32, maxElements: UInt64, maxLayer: UInt32, efConstruction: UInt32, dimension: UInt32) {
+public convenience init(config: HnswIndexConfig) {
     let handle =
         try! rustCall() {
-    uniffi_hnsw_fn_constructor_hnswindexcosine_new(
-        FfiConverterUInt32.lower(maxNbConnection),
-        FfiConverterUInt64.lower(maxElements),
-        FfiConverterUInt32.lower(maxLayer),
-        FfiConverterUInt32.lower(efConstruction),
-        FfiConverterUInt32.lower(dimension),$0
+    uniffi_hnsw_fn_constructor_hnswindex_new(
+        FfiConverterTypeHnswIndexConfig_lower(config),$0
     )
 }
     self.init(unsafeFromHandle: handle)
 }
 
     deinit {
-        try! rustCall { uniffi_hnsw_fn_free_hnswindexcosine(handle, $0) }
+        try! rustCall { uniffi_hnsw_fn_free_hnswindex(handle, $0) }
     }
 
     
-public static func load(directory: String, basename: String, dimension: UInt32)throws  -> HnswIndexCosine  {
-    return try  FfiConverterTypeHnswIndexCosine_lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_constructor_hnswindexcosine_load(
+public static func load(directory: String, basename: String, config: HnswIndexConfig)throws  -> HnswIndex  {
+    return try  FfiConverterTypeHnswIndex_lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
+    uniffi_hnsw_fn_constructor_hnswindex_load(
         FfiConverterString.lower(directory),
         FfiConverterString.lower(basename),
-        FfiConverterUInt32.lower(dimension),$0
+        FfiConverterTypeHnswIndexConfig_lower(config),$0
     )
 })
 }
     
 
     
+open func compact(deletedIds: [UInt64], config: HnswIndexConfig)throws  -> HnswIndex  {
+    return try  FfiConverterTypeHnswIndex_lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
+    uniffi_hnsw_fn_method_hnswindex_compact(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceUInt64.lower(deletedIds),
+        FfiConverterTypeHnswIndexConfig_lower(config),$0
+    )
+})
+}
+    
 open func getDimension() -> UInt32  {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
-    uniffi_hnsw_fn_method_hnswindexcosine_get_dimension(
+    uniffi_hnsw_fn_method_hnswindex_get_dimension(
             self.uniffiCloneHandle(),$0
     )
 })
 }
     
 open func insert(data: [Float], id: UInt64)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexcosine_insert(
+    uniffi_hnsw_fn_method_hnswindex_insert(
             self.uniffiCloneHandle(),
         FfiConverterSequenceFloat.lower(data),
         FfiConverterUInt64.lower(id),$0
@@ -639,7 +647,7 @@ open func insert(data: [Float], id: UInt64)throws   {try rustCallWithError(FfiCo
 }
     
 open func insertBatch(data: [[Float]], ids: [UInt64])throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexcosine_insert_batch(
+    uniffi_hnsw_fn_method_hnswindex_insert_batch(
             self.uniffiCloneHandle(),
         FfiConverterSequenceSequenceFloat.lower(data),
         FfiConverterSequenceUInt64.lower(ids),$0
@@ -649,7 +657,7 @@ open func insertBatch(data: [[Float]], ids: [UInt64])throws   {try rustCallWithE
     
 open func isEmpty()throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexcosine_is_empty(
+    uniffi_hnsw_fn_method_hnswindex_is_empty(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -657,14 +665,14 @@ open func isEmpty()throws  -> Bool  {
     
 open func len()throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexcosine_len(
+    uniffi_hnsw_fn_method_hnswindex_len(
             self.uniffiCloneHandle(),$0
     )
 })
 }
     
 open func save(directory: String, basename: String)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexcosine_save(
+    uniffi_hnsw_fn_method_hnswindex_save(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(directory),
         FfiConverterString.lower(basename),$0
@@ -674,7 +682,7 @@ open func save(directory: String, basename: String)throws   {try rustCallWithErr
     
 open func search(query: [Float], k: UInt32, efSearch: UInt32)throws  -> [SearchResult]  {
     return try  FfiConverterSequenceTypeSearchResult.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexcosine_search(
+    uniffi_hnsw_fn_method_hnswindex_search(
             self.uniffiCloneHandle(),
         FfiConverterSequenceFloat.lower(query),
         FfiConverterUInt32.lower(k),
@@ -684,7 +692,7 @@ open func search(query: [Float], k: UInt32, efSearch: UInt32)throws  -> [SearchR
 }
     
 open func setSearchingMode(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexcosine_set_searching_mode(
+    uniffi_hnsw_fn_method_hnswindex_set_searching_mode(
             self.uniffiCloneHandle(),
         FfiConverterBool.lower(enabled),$0
     )
@@ -699,24 +707,24 @@ open func setSearchingMode(enabled: Bool)throws   {try rustCallWithError(FfiConv
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeHnswIndexCosine: FfiConverter {
+public struct FfiConverterTypeHnswIndex: FfiConverter {
     typealias FfiType = UInt64
-    typealias SwiftType = HnswIndexCosine
+    typealias SwiftType = HnswIndex
 
-    public static func lift(_ handle: UInt64) throws -> HnswIndexCosine {
-        return HnswIndexCosine(unsafeFromHandle: handle)
+    public static func lift(_ handle: UInt64) throws -> HnswIndex {
+        return HnswIndex(unsafeFromHandle: handle)
     }
 
-    public static func lower(_ value: HnswIndexCosine) -> UInt64 {
+    public static func lower(_ value: HnswIndex) -> UInt64 {
         return value.uniffiCloneHandle()
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HnswIndexCosine {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HnswIndex {
         let handle: UInt64 = try readInt(&buf)
         return try lift(handle)
     }
 
-    public static func write(_ value: HnswIndexCosine, into buf: inout [UInt8]) {
+    public static func write(_ value: HnswIndex, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
@@ -725,208 +733,69 @@ public struct FfiConverterTypeHnswIndexCosine: FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeHnswIndexCosine_lift(_ handle: UInt64) throws -> HnswIndexCosine {
-    return try FfiConverterTypeHnswIndexCosine.lift(handle)
+public func FfiConverterTypeHnswIndex_lift(_ handle: UInt64) throws -> HnswIndex {
+    return try FfiConverterTypeHnswIndex.lift(handle)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeHnswIndexCosine_lower(_ value: HnswIndexCosine) -> UInt64 {
-    return FfiConverterTypeHnswIndexCosine.lower(value)
+public func FfiConverterTypeHnswIndex_lower(_ value: HnswIndex) -> UInt64 {
+    return FfiConverterTypeHnswIndex.lower(value)
 }
 
 
 
 
+public struct HnswIndexConfig: Equatable, Hashable {
+    public var maxNbConnection: UInt32
+    public var maxElements: UInt64
+    public var maxLayer: UInt32
+    public var efConstruction: UInt32
+    public var dimension: UInt32
+    public var distance: DistanceType
 
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(maxNbConnection: UInt32, maxElements: UInt64, maxLayer: UInt32, efConstruction: UInt32, dimension: UInt32, distance: DistanceType) {
+        self.maxNbConnection = maxNbConnection
+        self.maxElements = maxElements
+        self.maxLayer = maxLayer
+        self.efConstruction = efConstruction
+        self.dimension = dimension
+        self.distance = distance
+    }
 
-public protocol HnswIndexDotProtocol: AnyObject, Sendable {
-    
-    func getDimension()  -> UInt32
-    
-    func insert(data: [Float], id: UInt64) throws 
-    
-    func insertBatch(data: [[Float]], ids: [UInt64]) throws 
-    
-    func isEmpty() throws  -> Bool
-    
-    func len() throws  -> UInt64
-    
-    func save(directory: String, basename: String) throws 
-    
-    func search(query: [Float], k: UInt32, efSearch: UInt32) throws  -> [SearchResult]
-    
-    func setSearchingMode(enabled: Bool) throws 
     
 }
-open class HnswIndexDot: HnswIndexDotProtocol, @unchecked Sendable {
-    fileprivate let handle: UInt64
 
-    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
+#if compiler(>=6)
+extension HnswIndexConfig: Sendable {}
 #endif
-    public struct NoHandle {
-        public init() {}
-    }
-
-    // TODO: We'd like this to be `private` but for Swifty reasons,
-    // we can't implement `FfiConverter` without making this `required` and we can't
-    // make it `required` without making it `public`.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    required public init(unsafeFromHandle handle: UInt64) {
-        self.handle = handle
-    }
-
-    // This constructor can be used to instantiate a fake object.
-    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
-    //
-    // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public init(noHandle: NoHandle) {
-        self.handle = 0
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_hnsw_fn_clone_hnswindexdot(self.handle, $0) }
-    }
-public convenience init(maxNbConnection: UInt32, maxElements: UInt64, maxLayer: UInt32, efConstruction: UInt32, dimension: UInt32) {
-    let handle =
-        try! rustCall() {
-    uniffi_hnsw_fn_constructor_hnswindexdot_new(
-        FfiConverterUInt32.lower(maxNbConnection),
-        FfiConverterUInt64.lower(maxElements),
-        FfiConverterUInt32.lower(maxLayer),
-        FfiConverterUInt32.lower(efConstruction),
-        FfiConverterUInt32.lower(dimension),$0
-    )
-}
-    self.init(unsafeFromHandle: handle)
-}
-
-    deinit {
-        try! rustCall { uniffi_hnsw_fn_free_hnswindexdot(handle, $0) }
-    }
-
-    
-public static func load(directory: String, basename: String, dimension: UInt32)throws  -> HnswIndexDot  {
-    return try  FfiConverterTypeHnswIndexDot_lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_constructor_hnswindexdot_load(
-        FfiConverterString.lower(directory),
-        FfiConverterString.lower(basename),
-        FfiConverterUInt32.lower(dimension),$0
-    )
-})
-}
-    
-
-    
-open func getDimension() -> UInt32  {
-    return try!  FfiConverterUInt32.lift(try! rustCall() {
-    uniffi_hnsw_fn_method_hnswindexdot_get_dimension(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func insert(data: [Float], id: UInt64)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexdot_insert(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceFloat.lower(data),
-        FfiConverterUInt64.lower(id),$0
-    )
-}
-}
-    
-open func insertBatch(data: [[Float]], ids: [UInt64])throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexdot_insert_batch(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceSequenceFloat.lower(data),
-        FfiConverterSequenceUInt64.lower(ids),$0
-    )
-}
-}
-    
-open func isEmpty()throws  -> Bool  {
-    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexdot_is_empty(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func len()throws  -> UInt64  {
-    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexdot_len(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func save(directory: String, basename: String)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexdot_save(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(directory),
-        FfiConverterString.lower(basename),$0
-    )
-}
-}
-    
-open func search(query: [Float], k: UInt32, efSearch: UInt32)throws  -> [SearchResult]  {
-    return try  FfiConverterSequenceTypeSearchResult.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexdot_search(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceFloat.lower(query),
-        FfiConverterUInt32.lower(k),
-        FfiConverterUInt32.lower(efSearch),$0
-    )
-})
-}
-    
-open func setSearchingMode(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexdot_set_searching_mode(
-            self.uniffiCloneHandle(),
-        FfiConverterBool.lower(enabled),$0
-    )
-}
-}
-    
-
-    
-}
-
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeHnswIndexDot: FfiConverter {
-    typealias FfiType = UInt64
-    typealias SwiftType = HnswIndexDot
-
-    public static func lift(_ handle: UInt64) throws -> HnswIndexDot {
-        return HnswIndexDot(unsafeFromHandle: handle)
+public struct FfiConverterTypeHnswIndexConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HnswIndexConfig {
+        return
+            try HnswIndexConfig(
+                maxNbConnection: FfiConverterUInt32.read(from: &buf), 
+                maxElements: FfiConverterUInt64.read(from: &buf), 
+                maxLayer: FfiConverterUInt32.read(from: &buf), 
+                efConstruction: FfiConverterUInt32.read(from: &buf), 
+                dimension: FfiConverterUInt32.read(from: &buf), 
+                distance: FfiConverterTypeDistanceType.read(from: &buf)
+        )
     }
 
-    public static func lower(_ value: HnswIndexDot) -> UInt64 {
-        return value.uniffiCloneHandle()
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HnswIndexDot {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    public static func write(_ value: HnswIndexDot, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
+    public static func write(_ value: HnswIndexConfig, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.maxNbConnection, into: &buf)
+        FfiConverterUInt64.write(value.maxElements, into: &buf)
+        FfiConverterUInt32.write(value.maxLayer, into: &buf)
+        FfiConverterUInt32.write(value.efConstruction, into: &buf)
+        FfiConverterUInt32.write(value.dimension, into: &buf)
+        FfiConverterTypeDistanceType.write(value.distance, into: &buf)
     }
 }
 
@@ -934,436 +803,16 @@ public struct FfiConverterTypeHnswIndexDot: FfiConverter {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeHnswIndexDot_lift(_ handle: UInt64) throws -> HnswIndexDot {
-    return try FfiConverterTypeHnswIndexDot.lift(handle)
+public func FfiConverterTypeHnswIndexConfig_lift(_ buf: RustBuffer) throws -> HnswIndexConfig {
+    return try FfiConverterTypeHnswIndexConfig.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeHnswIndexDot_lower(_ value: HnswIndexDot) -> UInt64 {
-    return FfiConverterTypeHnswIndexDot.lower(value)
+public func FfiConverterTypeHnswIndexConfig_lower(_ value: HnswIndexConfig) -> RustBuffer {
+    return FfiConverterTypeHnswIndexConfig.lower(value)
 }
-
-
-
-
-
-
-public protocol HnswIndexL1Protocol: AnyObject, Sendable {
-    
-    func getDimension()  -> UInt32
-    
-    func insert(data: [Float], id: UInt64) throws 
-    
-    func insertBatch(data: [[Float]], ids: [UInt64]) throws 
-    
-    func isEmpty() throws  -> Bool
-    
-    func len() throws  -> UInt64
-    
-    func save(directory: String, basename: String) throws 
-    
-    func search(query: [Float], k: UInt32, efSearch: UInt32) throws  -> [SearchResult]
-    
-    func setSearchingMode(enabled: Bool) throws 
-    
-}
-open class HnswIndexL1: HnswIndexL1Protocol, @unchecked Sendable {
-    fileprivate let handle: UInt64
-
-    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public struct NoHandle {
-        public init() {}
-    }
-
-    // TODO: We'd like this to be `private` but for Swifty reasons,
-    // we can't implement `FfiConverter` without making this `required` and we can't
-    // make it `required` without making it `public`.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    required public init(unsafeFromHandle handle: UInt64) {
-        self.handle = handle
-    }
-
-    // This constructor can be used to instantiate a fake object.
-    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
-    //
-    // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public init(noHandle: NoHandle) {
-        self.handle = 0
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_hnsw_fn_clone_hnswindexl1(self.handle, $0) }
-    }
-public convenience init(maxNbConnection: UInt32, maxElements: UInt64, maxLayer: UInt32, efConstruction: UInt32, dimension: UInt32) {
-    let handle =
-        try! rustCall() {
-    uniffi_hnsw_fn_constructor_hnswindexl1_new(
-        FfiConverterUInt32.lower(maxNbConnection),
-        FfiConverterUInt64.lower(maxElements),
-        FfiConverterUInt32.lower(maxLayer),
-        FfiConverterUInt32.lower(efConstruction),
-        FfiConverterUInt32.lower(dimension),$0
-    )
-}
-    self.init(unsafeFromHandle: handle)
-}
-
-    deinit {
-        try! rustCall { uniffi_hnsw_fn_free_hnswindexl1(handle, $0) }
-    }
-
-    
-public static func load(directory: String, basename: String, dimension: UInt32)throws  -> HnswIndexL1  {
-    return try  FfiConverterTypeHnswIndexL1_lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_constructor_hnswindexl1_load(
-        FfiConverterString.lower(directory),
-        FfiConverterString.lower(basename),
-        FfiConverterUInt32.lower(dimension),$0
-    )
-})
-}
-    
-
-    
-open func getDimension() -> UInt32  {
-    return try!  FfiConverterUInt32.lift(try! rustCall() {
-    uniffi_hnsw_fn_method_hnswindexl1_get_dimension(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func insert(data: [Float], id: UInt64)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl1_insert(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceFloat.lower(data),
-        FfiConverterUInt64.lower(id),$0
-    )
-}
-}
-    
-open func insertBatch(data: [[Float]], ids: [UInt64])throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl1_insert_batch(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceSequenceFloat.lower(data),
-        FfiConverterSequenceUInt64.lower(ids),$0
-    )
-}
-}
-    
-open func isEmpty()throws  -> Bool  {
-    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl1_is_empty(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func len()throws  -> UInt64  {
-    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl1_len(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func save(directory: String, basename: String)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl1_save(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(directory),
-        FfiConverterString.lower(basename),$0
-    )
-}
-}
-    
-open func search(query: [Float], k: UInt32, efSearch: UInt32)throws  -> [SearchResult]  {
-    return try  FfiConverterSequenceTypeSearchResult.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl1_search(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceFloat.lower(query),
-        FfiConverterUInt32.lower(k),
-        FfiConverterUInt32.lower(efSearch),$0
-    )
-})
-}
-    
-open func setSearchingMode(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl1_set_searching_mode(
-            self.uniffiCloneHandle(),
-        FfiConverterBool.lower(enabled),$0
-    )
-}
-}
-    
-
-    
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeHnswIndexL1: FfiConverter {
-    typealias FfiType = UInt64
-    typealias SwiftType = HnswIndexL1
-
-    public static func lift(_ handle: UInt64) throws -> HnswIndexL1 {
-        return HnswIndexL1(unsafeFromHandle: handle)
-    }
-
-    public static func lower(_ value: HnswIndexL1) -> UInt64 {
-        return value.uniffiCloneHandle()
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HnswIndexL1 {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    public static func write(_ value: HnswIndexL1, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHnswIndexL1_lift(_ handle: UInt64) throws -> HnswIndexL1 {
-    return try FfiConverterTypeHnswIndexL1.lift(handle)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHnswIndexL1_lower(_ value: HnswIndexL1) -> UInt64 {
-    return FfiConverterTypeHnswIndexL1.lower(value)
-}
-
-
-
-
-
-
-public protocol HnswIndexL2Protocol: AnyObject, Sendable {
-    
-    func getDimension()  -> UInt32
-    
-    func insert(data: [Float], id: UInt64) throws 
-    
-    func insertBatch(data: [[Float]], ids: [UInt64]) throws 
-    
-    func isEmpty() throws  -> Bool
-    
-    func len() throws  -> UInt64
-    
-    func save(directory: String, basename: String) throws 
-    
-    func search(query: [Float], k: UInt32, efSearch: UInt32) throws  -> [SearchResult]
-    
-    func setSearchingMode(enabled: Bool) throws 
-    
-}
-open class HnswIndexL2: HnswIndexL2Protocol, @unchecked Sendable {
-    fileprivate let handle: UInt64
-
-    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public struct NoHandle {
-        public init() {}
-    }
-
-    // TODO: We'd like this to be `private` but for Swifty reasons,
-    // we can't implement `FfiConverter` without making this `required` and we can't
-    // make it `required` without making it `public`.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    required public init(unsafeFromHandle handle: UInt64) {
-        self.handle = handle
-    }
-
-    // This constructor can be used to instantiate a fake object.
-    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
-    //
-    // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public init(noHandle: NoHandle) {
-        self.handle = 0
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public func uniffiCloneHandle() -> UInt64 {
-        return try! rustCall { uniffi_hnsw_fn_clone_hnswindexl2(self.handle, $0) }
-    }
-public convenience init(maxNbConnection: UInt32, maxElements: UInt64, maxLayer: UInt32, efConstruction: UInt32, dimension: UInt32) {
-    let handle =
-        try! rustCall() {
-    uniffi_hnsw_fn_constructor_hnswindexl2_new(
-        FfiConverterUInt32.lower(maxNbConnection),
-        FfiConverterUInt64.lower(maxElements),
-        FfiConverterUInt32.lower(maxLayer),
-        FfiConverterUInt32.lower(efConstruction),
-        FfiConverterUInt32.lower(dimension),$0
-    )
-}
-    self.init(unsafeFromHandle: handle)
-}
-
-    deinit {
-        try! rustCall { uniffi_hnsw_fn_free_hnswindexl2(handle, $0) }
-    }
-
-    
-public static func load(directory: String, basename: String, dimension: UInt32)throws  -> HnswIndexL2  {
-    return try  FfiConverterTypeHnswIndexL2_lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_constructor_hnswindexl2_load(
-        FfiConverterString.lower(directory),
-        FfiConverterString.lower(basename),
-        FfiConverterUInt32.lower(dimension),$0
-    )
-})
-}
-    
-
-    
-open func getDimension() -> UInt32  {
-    return try!  FfiConverterUInt32.lift(try! rustCall() {
-    uniffi_hnsw_fn_method_hnswindexl2_get_dimension(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func insert(data: [Float], id: UInt64)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl2_insert(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceFloat.lower(data),
-        FfiConverterUInt64.lower(id),$0
-    )
-}
-}
-    
-open func insertBatch(data: [[Float]], ids: [UInt64])throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl2_insert_batch(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceSequenceFloat.lower(data),
-        FfiConverterSequenceUInt64.lower(ids),$0
-    )
-}
-}
-    
-open func isEmpty()throws  -> Bool  {
-    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl2_is_empty(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func len()throws  -> UInt64  {
-    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl2_len(
-            self.uniffiCloneHandle(),$0
-    )
-})
-}
-    
-open func save(directory: String, basename: String)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl2_save(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(directory),
-        FfiConverterString.lower(basename),$0
-    )
-}
-}
-    
-open func search(query: [Float], k: UInt32, efSearch: UInt32)throws  -> [SearchResult]  {
-    return try  FfiConverterSequenceTypeSearchResult.lift(try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl2_search(
-            self.uniffiCloneHandle(),
-        FfiConverterSequenceFloat.lower(query),
-        FfiConverterUInt32.lower(k),
-        FfiConverterUInt32.lower(efSearch),$0
-    )
-})
-}
-    
-open func setSearchingMode(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
-    uniffi_hnsw_fn_method_hnswindexl2_set_searching_mode(
-            self.uniffiCloneHandle(),
-        FfiConverterBool.lower(enabled),$0
-    )
-}
-}
-    
-
-    
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeHnswIndexL2: FfiConverter {
-    typealias FfiType = UInt64
-    typealias SwiftType = HnswIndexL2
-
-    public static func lift(_ handle: UInt64) throws -> HnswIndexL2 {
-        return HnswIndexL2(unsafeFromHandle: handle)
-    }
-
-    public static func lower(_ value: HnswIndexL2) -> UInt64 {
-        return value.uniffiCloneHandle()
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HnswIndexL2 {
-        let handle: UInt64 = try readInt(&buf)
-        return try lift(handle)
-    }
-
-    public static func write(_ value: HnswIndexL2, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHnswIndexL2_lift(_ handle: UInt64) throws -> HnswIndexL2 {
-    return try FfiConverterTypeHnswIndexL2.lift(handle)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeHnswIndexL2_lower(_ value: HnswIndexL2) -> UInt64 {
-    return FfiConverterTypeHnswIndexL2.lower(value)
-}
-
-
 
 
 public struct SearchResult: Equatable, Hashable {
@@ -1507,6 +956,8 @@ public enum HnswError: Swift.Error, Equatable, Hashable, Foundation.LocalizedErr
     
     case EmptyIndex(message: String)
     
+    case DistanceMismatch(message: String)
+    
     case DimensionMismatch(message: String)
     
     case ReloadError(message: String)
@@ -1552,15 +1003,19 @@ public struct FfiConverterTypeHnswError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 4: return .DimensionMismatch(
+        case 4: return .DistanceMismatch(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 5: return .ReloadError(
+        case 5: return .DimensionMismatch(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .DumpError(
+        case 6: return .ReloadError(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 7: return .DumpError(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -1581,12 +1036,14 @@ public struct FfiConverterTypeHnswError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(2))
         case .EmptyIndex(_ /* message is ignored*/):
             writeInt(&buf, Int32(3))
-        case .DimensionMismatch(_ /* message is ignored*/):
+        case .DistanceMismatch(_ /* message is ignored*/):
             writeInt(&buf, Int32(4))
-        case .ReloadError(_ /* message is ignored*/):
+        case .DimensionMismatch(_ /* message is ignored*/):
             writeInt(&buf, Int32(5))
-        case .DumpError(_ /* message is ignored*/):
+        case .ReloadError(_ /* message is ignored*/):
             writeInt(&buf, Int32(6))
+        case .DumpError(_ /* message is ignored*/):
+            writeInt(&buf, Int32(7))
 
         
         }
@@ -1723,124 +1180,37 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_get_dimension() != 34712) {
+    if (uniffi_hnsw_checksum_method_hnswindex_compact() != 58096) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_insert() != 16349) {
+    if (uniffi_hnsw_checksum_method_hnswindex_get_dimension() != 59616) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_insert_batch() != 28404) {
+    if (uniffi_hnsw_checksum_method_hnswindex_insert() != 53129) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_is_empty() != 1543) {
+    if (uniffi_hnsw_checksum_method_hnswindex_insert_batch() != 13453) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_len() != 15997) {
+    if (uniffi_hnsw_checksum_method_hnswindex_is_empty() != 40873) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_save() != 50644) {
+    if (uniffi_hnsw_checksum_method_hnswindex_len() != 807) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_search() != 13338) {
+    if (uniffi_hnsw_checksum_method_hnswindex_save() != 38703) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexcosine_set_searching_mode() != 58904) {
+    if (uniffi_hnsw_checksum_method_hnswindex_search() != 8428) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_get_dimension() != 28306) {
+    if (uniffi_hnsw_checksum_method_hnswindex_set_searching_mode() != 1259) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_insert() != 57933) {
+    if (uniffi_hnsw_checksum_constructor_hnswindex_load() != 19516) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_insert_batch() != 6031) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_is_empty() != 15572) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_len() != 24375) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_save() != 27010) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_search() != 1649) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexdot_set_searching_mode() != 24194) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_get_dimension() != 48603) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_insert() != 30694) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_insert_batch() != 26027) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_is_empty() != 59727) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_len() != 54904) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_save() != 64943) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_search() != 43132) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl1_set_searching_mode() != 64270) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_get_dimension() != 23269) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_insert() != 55475) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_insert_batch() != 25817) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_is_empty() != 51521) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_len() != 25979) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_save() != 22271) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_search() != 14352) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_method_hnswindexl2_set_searching_mode() != 1290) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexcosine_load() != 60188) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexcosine_new() != 40101) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexdot_load() != 23668) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexdot_new() != 29965) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexl1_load() != 3319) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexl1_new() != 32705) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexl2_load() != 39141) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hnsw_checksum_constructor_hnswindexl2_new() != 5001) {
+    if (uniffi_hnsw_checksum_constructor_hnswindex_new() != 3397) {
         return InitializationResult.apiChecksumMismatch
     }
 
