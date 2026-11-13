@@ -392,10 +392,18 @@ impl HnswIndex {
         let pairs: Vec<(&Vec<f32>, usize)> =
             data.iter().zip(ids.iter().map(|&id| id as usize)).collect();
         match &*guard {
-            HnswIndexInner::L2(inner) => inner.hnsw.parallel_insert(&pairs),
-            HnswIndexInner::Cosine(inner) => inner.hnsw.parallel_insert(&pairs),
-            HnswIndexInner::Dot(inner) => inner.hnsw.parallel_insert(&pairs),
-            HnswIndexInner::L1(inner) => inner.hnsw.parallel_insert(&pairs),
+            HnswIndexInner::L2(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
+            HnswIndexInner::Cosine(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
+            HnswIndexInner::Dot(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
+            HnswIndexInner::L1(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
         }
         Ok(())
     }
