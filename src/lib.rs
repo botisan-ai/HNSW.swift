@@ -392,10 +392,18 @@ impl HnswIndex {
         let pairs: Vec<(&Vec<f32>, usize)> =
             data.iter().zip(ids.iter().map(|&id| id as usize)).collect();
         match &*guard {
-            HnswIndexInner::L2(inner) => inner.hnsw.parallel_insert(&pairs),
-            HnswIndexInner::Cosine(inner) => inner.hnsw.parallel_insert(&pairs),
-            HnswIndexInner::Dot(inner) => inner.hnsw.parallel_insert(&pairs),
-            HnswIndexInner::L1(inner) => inner.hnsw.parallel_insert(&pairs),
+            HnswIndexInner::L2(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
+            HnswIndexInner::Cosine(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
+            HnswIndexInner::Dot(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
+            HnswIndexInner::L1(inner) => {
+                pairs.iter().for_each(|&(v, id)| inner.hnsw.insert((v, id)))
+            }
         }
         Ok(())
     }
@@ -547,3 +555,148 @@ impl HnswIndex {
 }
 
 uniffi::setup_scaffolding!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cosine_config(dimension: u32) -> HnswIndexConfig {
+        HnswIndexConfig {
+            max_nb_connection: 16,
+            max_elements: 200_000,
+            max_layer: 16,
+            ef_construction: 200,
+            dimension,
+            distance: DistanceType::Cosine,
+        }
+    }
+
+    fn vector(seed_text: &str, spread: f32, dimension: usize) -> Vec<f32> {
+        let mut seed = seed_text
+            .bytes()
+            .fold(14_695_981_039_346_656_037u64, |acc, b| {
+                (acc ^ b as u64).wrapping_mul(1_099_511_628_211)
+            });
+        (0..dimension)
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                0.01 + ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * spread
+            })
+            .collect()
+    }
+
+    fn found_ids(index: &HnswIndex, query: Vec<f32>, k: u32) -> HashSet<u64> {
+        index
+            .search(query, k, 150)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    #[test]
+    fn a_second_point_is_never_stranded_from_search() {
+        let kept = vector("kept", 0.006, 1536);
+        let fresh = vector("fresh", 0.0078, 1536);
+        let query = vec![0.01f32; 1536];
+        let stranded = (0..2000)
+            .filter(|_| {
+                let index = HnswIndex::new(cosine_config(1536));
+                index.insert(kept.clone(), 0).unwrap();
+                index.insert(fresh.clone(), 1).unwrap();
+                found_ids(&index, query.clone(), 150) != HashSet::from([0, 1])
+            })
+            .count();
+        assert_eq!(
+            stranded, 0,
+            "{stranded} of 2000 two-point indexes lost a point"
+        );
+    }
+
+    fn top_level(index: &HnswIndex) -> u8 {
+        match &*index.inner.lock().unwrap() {
+            HnswIndexInner::Cosine(inner) => inner.hnsw.get_max_level_observed(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn every_point_of_a_small_library_is_reachable() {
+        let query = vec![0.01f32; 64];
+        let mut highest_level = 0;
+        for size in 2..=64u64 {
+            let index = HnswIndex::new(cosine_config(64));
+            for id in 0..size {
+                index
+                    .insert(vector(&format!("memo-{size}-{id}"), 0.008, 64), id)
+                    .unwrap();
+            }
+            let expected: HashSet<u64> = (0..size).collect();
+            assert_eq!(
+                found_ids(&index, query.clone(), 150),
+                expected,
+                "a {size}-memo library lost a point"
+            );
+            highest_level = highest_level.max(top_level(&index));
+        }
+        assert!(highest_level >= 1, "no library put a point above layer 0");
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        }
+    }
+
+    fn reindex_library(seed: u64) {
+        let mut rng = Lcg(seed);
+        let centres: Vec<Vec<f32>> = (0..12)
+            .map(|_| (0..1536).map(|_| rng.next()).collect())
+            .collect();
+        let memos: Vec<Vec<f32>> = (0..100)
+            .map(|i| {
+                centres[i % 12]
+                    .iter()
+                    .map(|c| c + 0.6 * rng.next())
+                    .collect()
+            })
+            .collect();
+        let index = HnswIndex::new(cosine_config(1536));
+        for (batch, chunk) in memos.chunks(32).enumerate() {
+            let ids = (0..chunk.len() as u64)
+                .map(|i| batch as u64 * 32 + i)
+                .collect();
+            index.insert_batch(chunk.to_vec(), ids).unwrap();
+        }
+        assert_eq!(index.len().unwrap(), 100);
+    }
+
+    #[test]
+    #[ignore = "stress: HNSW_STRESS_LIBRARIES=3000 cargo test --release -- --ignored"]
+    fn insert_batch_never_hangs_across_many_reindexed_libraries() {
+        let libraries: u64 = std::env::var("HNSW_STRESS_LIBRARIES")
+            .map(|n| n.parse().unwrap())
+            .unwrap_or(3000);
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for seed in 1..=libraries {
+                reindex_library(seed);
+                done.send(seed).unwrap();
+            }
+        });
+        for seed in 1..=libraries {
+            match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+                Ok(_) => {}
+                Err(_) => panic!("insert_batch hung or panicked on library {seed} of {libraries}"),
+            }
+        }
+    }
+}
