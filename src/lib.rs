@@ -604,9 +604,17 @@ mod tests {
         assert_eq!(stranded, 0, "{stranded} of 2000 two-point indexes lost a point");
     }
 
+    fn top_level(index: &HnswIndex) -> u8 {
+        match &*index.inner.lock().unwrap() {
+            HnswIndexInner::Cosine(inner) => inner.hnsw.get_max_level_observed(),
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
     fn every_point_of_a_small_library_is_reachable() {
         let query = vec![0.01f32; 64];
+        let mut highest_level = 0;
         for size in 2..=64u64 {
             let index = HnswIndex::new(cosine_config(64));
             for id in 0..size {
@@ -620,6 +628,8 @@ mod tests {
                 expected,
                 "a {size}-memo library lost a point"
             );
+            highest_level = highest_level.max(top_level(&index));
         }
+        assert!(highest_level >= 1, "no library put a point above layer 0");
     }
 }
