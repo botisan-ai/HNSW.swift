@@ -16,7 +16,7 @@ if useLocalFramework {
     binaryTarget = .binaryTarget(
         name: "HnswRS",
         url:
-        "https://github.com/lhr0909/HNSW.swift/releases/download/\(releaseTag)/libhnsw-rs.xcframework.zip",
+        "https://github.com/botisan-ai/HNSW.swift/releases/download/\(releaseTag)/libhnsw-rs.xcframework.zip",
         checksum: releaseChecksum
     )
 }
