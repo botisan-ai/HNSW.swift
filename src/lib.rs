@@ -547,3 +547,79 @@ impl HnswIndex {
 }
 
 uniffi::setup_scaffolding!();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cosine_config(dimension: u32) -> HnswIndexConfig {
+        HnswIndexConfig {
+            max_nb_connection: 16,
+            max_elements: 200_000,
+            max_layer: 16,
+            ef_construction: 200,
+            dimension,
+            distance: DistanceType::Cosine,
+        }
+    }
+
+    fn vector(seed_text: &str, spread: f32, dimension: usize) -> Vec<f32> {
+        let mut seed = seed_text
+            .bytes()
+            .fold(14_695_981_039_346_656_037u64, |acc, b| {
+                (acc ^ b as u64).wrapping_mul(1_099_511_628_211)
+            });
+        (0..dimension)
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                0.01 + ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * spread
+            })
+            .collect()
+    }
+
+    fn found_ids(index: &HnswIndex, query: Vec<f32>, k: u32) -> HashSet<u64> {
+        index
+            .search(query, k, 150)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    #[test]
+    fn a_second_point_is_never_stranded_from_search() {
+        let kept = vector("kept", 0.006, 1536);
+        let fresh = vector("fresh", 0.0078, 1536);
+        let query = vec![0.01f32; 1536];
+        let stranded = (0..2000)
+            .filter(|_| {
+                let index = HnswIndex::new(cosine_config(1536));
+                index.insert(kept.clone(), 0).unwrap();
+                index.insert(fresh.clone(), 1).unwrap();
+                found_ids(&index, query.clone(), 150) != HashSet::from([0, 1])
+            })
+            .count();
+        assert_eq!(stranded, 0, "{stranded} of 2000 two-point indexes lost a point");
+    }
+
+    #[test]
+    fn every_point_of_a_small_library_is_reachable() {
+        let query = vec![0.01f32; 64];
+        for size in 2..=64u64 {
+            let index = HnswIndex::new(cosine_config(64));
+            for id in 0..size {
+                index
+                    .insert(vector(&format!("memo-{size}-{id}"), 0.008, 64), id)
+                    .unwrap();
+            }
+            let expected: HashSet<u64> = (0..size).collect();
+            assert_eq!(
+                found_ids(&index, query.clone(), 150),
+                expected,
+                "a {size}-memo library lost a point"
+            );
+        }
+    }
+}
