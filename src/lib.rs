@@ -601,7 +601,10 @@ mod tests {
                 found_ids(&index, query.clone(), 150) != HashSet::from([0, 1])
             })
             .count();
-        assert_eq!(stranded, 0, "{stranded} of 2000 two-point indexes lost a point");
+        assert_eq!(
+            stranded, 0,
+            "{stranded} of 2000 two-point indexes lost a point"
+        );
     }
 
     fn top_level(index: &HnswIndex) -> u8 {
@@ -651,11 +654,18 @@ mod tests {
             .map(|_| (0..1536).map(|_| rng.next()).collect())
             .collect();
         let memos: Vec<Vec<f32>> = (0..100)
-            .map(|i| centres[i % 12].iter().map(|c| c + 0.6 * rng.next()).collect())
+            .map(|i| {
+                centres[i % 12]
+                    .iter()
+                    .map(|c| c + 0.6 * rng.next())
+                    .collect()
+            })
             .collect();
         let index = HnswIndex::new(cosine_config(1536));
         for (batch, chunk) in memos.chunks(32).enumerate() {
-            let ids = (0..chunk.len() as u64).map(|i| batch as u64 * 32 + i).collect();
+            let ids = (0..chunk.len() as u64)
+                .map(|i| batch as u64 * 32 + i)
+                .collect();
             index.insert_batch(chunk.to_vec(), ids).unwrap();
         }
         assert_eq!(index.len().unwrap(), 100);
