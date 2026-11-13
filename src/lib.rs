@@ -632,4 +632,53 @@ mod tests {
         }
         assert!(highest_level >= 1, "no library put a point above layer 0");
     }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        }
+    }
+
+    fn reindex_library(seed: u64) {
+        let mut rng = Lcg(seed);
+        let centres: Vec<Vec<f32>> = (0..12)
+            .map(|_| (0..1536).map(|_| rng.next()).collect())
+            .collect();
+        let memos: Vec<Vec<f32>> = (0..100)
+            .map(|i| centres[i % 12].iter().map(|c| c + 0.6 * rng.next()).collect())
+            .collect();
+        let index = HnswIndex::new(cosine_config(1536));
+        for (batch, chunk) in memos.chunks(32).enumerate() {
+            let ids = (0..chunk.len() as u64).map(|i| batch as u64 * 32 + i).collect();
+            index.insert_batch(chunk.to_vec(), ids).unwrap();
+        }
+        assert_eq!(index.len().unwrap(), 100);
+    }
+
+    #[test]
+    #[ignore = "stress: HNSW_STRESS_LIBRARIES=3000 cargo test --release -- --ignored"]
+    fn insert_batch_never_hangs_across_many_reindexed_libraries() {
+        let libraries: u64 = std::env::var("HNSW_STRESS_LIBRARIES")
+            .map(|n| n.parse().unwrap())
+            .unwrap_or(3000);
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for seed in 1..=libraries {
+                reindex_library(seed);
+                done.send(seed).unwrap();
+            }
+        });
+        for seed in 1..=libraries {
+            match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+                Ok(_) => {}
+                Err(_) => panic!("insert_batch hung or panicked on library {seed} of {libraries}"),
+            }
+        }
+    }
 }
