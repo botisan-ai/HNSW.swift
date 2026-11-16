@@ -681,6 +681,10 @@ mod tests {
             })
             .collect();
         let ids: Vec<u64> = (0..points.len() as u64).collect();
+        let workers = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
         for distance in [
             DistanceType::L1,
             DistanceType::L2,
@@ -692,7 +696,10 @@ mod tests {
                 ..cosine_config(32)
             };
             let batched = HnswIndex::new(config);
-            batched.insert_batch(points.clone(), ids.clone()).unwrap();
+            workers.install(|| {
+                assert_eq!(rayon::current_num_threads(), 4);
+                batched.insert_batch(points.clone(), ids.clone()).unwrap();
+            });
             let one_by_one = HnswIndex::new(config);
             for (point, &id) in points.iter().zip(&ids) {
                 one_by_one.insert(point.clone(), id).unwrap();

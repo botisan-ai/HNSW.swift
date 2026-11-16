@@ -472,6 +472,7 @@ name = "hnsw-swift"
 version = "0.2.3"
 dependencies = [
  "hnsw_rs",
+ "rayon",
  "serde",
  "thiserror 2.0.17",
  "uniffi",
