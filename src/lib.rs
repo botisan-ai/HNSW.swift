@@ -559,6 +559,7 @@ uniffi::setup_scaffolding!();
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hnsw_rs::hnsw::PointId;
 
     fn cosine_config(dimension: u32) -> HnswIndexConfig {
         HnswIndexConfig {
@@ -642,6 +643,65 @@ mod tests {
             highest_level = highest_level.max(top_level(&index));
         }
         assert!(highest_level >= 1, "no library put a point above layer 0");
+    }
+
+    type GraphSnapshot = Vec<(PointId, usize, Vec<Vec<(usize, PointId)>>)>;
+
+    fn snapshot<D: Distance<f32> + Send + Sync>(hnsw: &Hnsw<'static, f32, D>) -> GraphSnapshot {
+        hnsw.get_point_indexation()
+            .into_iter()
+            .map(|point| {
+                let layers = point
+                    .get_neighborhood_id()
+                    .into_iter()
+                    .map(|layer| layer.into_iter().map(|n| (n.d_id, n.p_id)).collect())
+                    .collect();
+                (point.get_point_id(), point.get_origin_id(), layers)
+            })
+            .collect()
+    }
+
+    fn graph(index: &HnswIndex) -> GraphSnapshot {
+        match &*index.inner.lock().unwrap() {
+            HnswIndexInner::L1(inner) => snapshot(&inner.hnsw),
+            HnswIndexInner::L2(inner) => snapshot(&inner.hnsw),
+            HnswIndexInner::Cosine(inner) => snapshot(&inner.hnsw),
+            HnswIndexInner::Dot(inner) => snapshot(&inner.hnsw),
+        }
+    }
+
+    #[test]
+    fn insert_batch_builds_the_graph_of_one_insert_at_a_time() {
+        let mut rng = Lcg(20637);
+        let points: Vec<Vec<f32>> = (0..512)
+            .map(|_| {
+                let v: Vec<f32> = (0..32).map(|_| rng.next() + 0.5).collect();
+                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                v.into_iter().map(|x| x / norm).collect()
+            })
+            .collect();
+        let ids: Vec<u64> = (0..points.len() as u64).collect();
+        for distance in [
+            DistanceType::L1,
+            DistanceType::L2,
+            DistanceType::Cosine,
+            DistanceType::Dot,
+        ] {
+            let config = HnswIndexConfig {
+                distance,
+                ..cosine_config(32)
+            };
+            let batched = HnswIndex::new(config);
+            batched.insert_batch(points.clone(), ids.clone()).unwrap();
+            let one_by_one = HnswIndex::new(config);
+            for (point, &id) in points.iter().zip(&ids) {
+                one_by_one.insert(point.clone(), id).unwrap();
+            }
+            assert!(
+                graph(&batched) == graph(&one_by_one),
+                "{distance:?} insert_batch built a different graph than inserting one point at a time"
+            );
+        }
     }
 
     struct Lcg(u64);
