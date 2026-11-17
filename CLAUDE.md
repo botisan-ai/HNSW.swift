@@ -71,7 +71,7 @@ The Swift wrapper (`HnswIndex`) provides a unified interface that internally dis
 - `HnswIndexL2::new(max_nb_connection, max_elements, max_layer, ef_construction, dimension)` - Create new L2 index
 - `HnswIndexL2::load(directory, basename, dimension)` - Load saved L2 index from disk
 - `insert(data, id)` - Insert a single vector
-- `insert_batch(data, ids)` - Insert multiple vectors in parallel
+- `insert_batch(data, ids)` - Insert multiple vectors, one at a time (hnsw_rs `parallel_insert` can deadlock)
 - `search(query, k, ef_search)` - Search for k nearest neighbors
 - `save(directory, basename)` - Save index to disk (creates .hnsw.graph and .hnsw.data files)
 - `len()` / `is_empty()` - Query index size
@@ -157,6 +157,6 @@ This ensures:
 
 Swift tests are in `Tests/HnswSwiftTests/`. The test suite demonstrates:
 - Basic index operations (insert, search)
-- Batch insertion with parallel processing
+- Batch insertion
 - Different distance metrics (L2, Cosine)
 - Save and load functionality with proper memory cleanup

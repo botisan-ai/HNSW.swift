@@ -11,12 +11,12 @@ if useLocalFramework {
         path: "./build/libhnsw-rs.xcframework"
     )
 } else {
-    let releaseTag = "0.2.1"
-    let releaseChecksum = "1cd0aabd6a26625259673df11709b2f29f568e5b4391d4a5f9c0ac531d9986cf"
+    let releaseTag = "0.2.3"
+    let releaseChecksum = "46f4f092135d38929f6f0ccb3d7897818ddf352fb2584533afcc2f9b6175e4d1"
     binaryTarget = .binaryTarget(
         name: "HnswRS",
         url:
-        "https://github.com/lhr0909/HNSW.swift/releases/download/\(releaseTag)/libhnsw-rs.xcframework.zip",
+        "https://github.com/botisan-ai/HNSW.swift/releases/download/\(releaseTag)/libhnsw-rs.xcframework.zip",
         checksum: releaseChecksum
     )
 }
