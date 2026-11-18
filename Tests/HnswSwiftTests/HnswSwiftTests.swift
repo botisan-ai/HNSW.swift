@@ -101,9 +101,11 @@ import Testing
     
     try await index.save(directory: testDir.path, basename: "test_index")
     
-    let graphFile = testDir.appendingPathComponent("test_index.hnsw.graph")
-    let dataFile = testDir.appendingPathComponent("test_index.hnsw.data")
-    
+    let pointer = testDir.appendingPathComponent("test_index.hnsw.current")
+    let graphFile = testDir.appendingPathComponent("test_index.r1.hnsw.graph")
+    let dataFile = testDir.appendingPathComponent("test_index.r1.hnsw.data")
+
+    #expect(try String(contentsOf: pointer, encoding: .utf8) == "test_index.r1\n")
     #expect(FileManager.default.fileExists(atPath: graphFile.path))
     #expect(FileManager.default.fileExists(atPath: dataFile.path))
     
