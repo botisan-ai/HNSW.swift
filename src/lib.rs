@@ -794,10 +794,8 @@ mod tests {
             DistanceType::Cosine,
             DistanceType::Dot,
         ] {
-            let directory = std::env::temp_dir().join(format!(
-                "hnsw-resave-{distance:?}-{}",
-                std::process::id()
-            ));
+            let directory = std::env::temp_dir()
+                .join(format!("hnsw-resave-{distance:?}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&directory);
             std::fs::create_dir_all(&directory).unwrap();
             let path = directory.to_string_lossy().into_owned();
@@ -831,5 +829,43 @@ mod tests {
             );
             std::fs::remove_dir_all(&directory).unwrap();
         }
+    }
+
+    #[test]
+    fn a_loaded_index_keeps_working_after_its_dump_is_replaced() {
+        let directory = std::env::temp_dir().join(format!("hnsw-in-memory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.to_string_lossy().into_owned();
+        let config = cosine_config(32);
+        let points: Vec<Vec<f32>> = (0..40)
+            .map(|id| unit(vector(&format!("point {id}"), 2.0, 32)))
+            .collect();
+        let first = HnswIndex::new(config);
+        for (id, point) in points.iter().enumerate() {
+            first.insert(point.clone(), id as u64).unwrap();
+        }
+        first.save(path.clone(), "hnsw".into()).unwrap();
+
+        let loaded = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        std::fs::write(directory.join("hnsw.hnsw.data"), b"replaced").unwrap();
+        std::fs::remove_file(directory.join("hnsw.hnsw.graph")).unwrap();
+        for (id, point) in points.iter().enumerate() {
+            assert!(
+                found_ids(&loaded, point.clone(), 5).contains(&(id as u64)),
+                "point {id} after its dump was replaced"
+            );
+        }
+        loaded
+            .insert(
+                unit(vector("saved after the dump was replaced", 2.0, 32)),
+                40,
+            )
+            .unwrap();
+        loaded.save(path.clone(), "hnsw".into()).unwrap();
+
+        let reloaded = HnswIndex::load(path, "hnsw".into(), config).unwrap();
+        assert_eq!(reloaded.len().unwrap(), 41);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }
