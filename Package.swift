@@ -12,7 +12,7 @@ if useLocalFramework {
     )
 } else {
     let releaseTag = "0.2.4"
-    let releaseChecksum = "702826672c82c23736e47dfb6d9346d803f5ccf9493211eff977b53dd1636e4f"
+    let releaseChecksum = "a677278d3fcd5260da3acf8cff2c1a4c3c444a3a6b9ee70ff9c81b96a8073101"
     binaryTarget = .binaryTarget(
         name: "HnswRS",
         url:
