@@ -868,4 +868,177 @@ mod tests {
         assert_eq!(reloaded.len().unwrap(), 41);
         std::fs::remove_dir_all(&directory).unwrap();
     }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("hnsw-{name}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// A saved index of 40 points, loaded back, with a 41st point inserted and not yet saved.
+    fn loaded_with_unsaved_point(directory: &Path) -> (HnswIndex, HnswIndexConfig, String) {
+        let path = directory.to_string_lossy().into_owned();
+        let config = cosine_config(32);
+        let first = HnswIndex::new(config);
+        for id in 0..40 {
+            first
+                .insert(unit(vector(&format!("point {id}"), 2.0, 32)), id)
+                .unwrap();
+        }
+        first.save(path.clone(), "hnsw".into()).unwrap();
+        let loaded = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        loaded.insert(unit(vector("unsaved", 2.0, 32)), 40).unwrap();
+        (loaded, config, path)
+    }
+
+    fn data_files(directory: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_string_lossy().ends_with(".hnsw.data"))
+            .collect()
+    }
+
+    #[test]
+    fn a_save_that_cannot_write_the_data_file_keeps_the_previous_dump() {
+        let directory = scratch("read-only-data");
+        let (loaded, config, path) = loaded_with_unsaved_point(&directory);
+        for data in data_files(&directory) {
+            set_mode(&data, 0o444);
+        }
+        set_mode(&directory, 0o555);
+
+        let failed = loaded.save(path.clone(), "hnsw".into());
+        set_mode(&directory, 0o755);
+        for data in data_files(&directory) {
+            set_mode(&data, 0o644);
+        }
+        assert!(
+            matches!(failed, Err(HnswError::DumpError(_))),
+            "the failed save returns an error: {failed:?}"
+        );
+        let previous = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        assert_eq!(
+            previous.len().unwrap(),
+            40,
+            "the previous dump is still loadable"
+        );
+
+        loaded.save(path.clone(), "hnsw".into()).unwrap();
+        assert_eq!(
+            HnswIndex::load(path, "hnsw".into(), config)
+                .unwrap()
+                .len()
+                .unwrap(),
+            41,
+            "the live index saves once writing works again"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_save_with_a_read_only_data_file_keeps_the_previous_dump() {
+        let directory = scratch("read-only-file");
+        let (loaded, config, path) = loaded_with_unsaved_point(&directory);
+        for data in data_files(&directory) {
+            set_mode(&data, 0o444);
+        }
+
+        let result = loaded.save(path.clone(), "hnsw".into());
+        for data in data_files(&directory) {
+            set_mode(&data, 0o644);
+        }
+        let reloaded =
+            HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap_or_else(|error| {
+                panic!("after a save returning {result:?} the dump must load: {error:?}")
+            });
+        let count = reloaded.len().unwrap();
+        assert!(
+            (result.is_ok() && count == 41) || (result.is_err() && count == 40),
+            "save returned {result:?}, reload has {count} points"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// The child side of `a_save_killed_at_any_moment_leaves_a_loadable_dump`, run as its own process.
+    #[test]
+    #[ignore = "run by a_save_killed_at_any_moment_leaves_a_loadable_dump"]
+    fn save_crash_child() {
+        let Ok(path) = std::env::var("HNSW_CRASH_DIR") else {
+            return;
+        };
+        let config = HnswIndexConfig {
+            max_elements: 400_000,
+            ..cosine_config(256)
+        };
+        let index = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        if std::env::var("HNSW_CRASH_ROLE").as_deref() == Ok("verify") {
+            println!("HNSW_CRASH_COUNT={}", index.len().unwrap());
+            return;
+        }
+        for id in 100_000u64.. {
+            index
+                .insert(unit(vector(&format!("saved in a loop {id}"), 2.0, 256)), id)
+                .unwrap();
+            index.save(path.clone(), "hnsw".into()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_save_killed_at_any_moment_leaves_a_loadable_dump() {
+        let directory = scratch("killed-save");
+        let path = directory.to_string_lossy().into_owned();
+        let config = HnswIndexConfig {
+            max_elements: 400_000,
+            ..cosine_config(256)
+        };
+        let first = HnswIndex::new(config);
+        let points: Vec<Vec<f32>> = (0..3000)
+            .map(|id| unit(vector(&format!("point {id}"), 2.0, 256)))
+            .collect();
+        first.insert_batch(points, (0..3000).collect()).unwrap();
+        first.save(path.clone(), "hnsw".into()).unwrap();
+        let child = |role: &str| {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "tests::save_crash_child",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("HNSW_CRASH_DIR", &path)
+                .env("HNSW_CRASH_ROLE", role)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null());
+            command
+        };
+        let mut broken = Vec::new();
+        for trial in 0..40u64 {
+            let mut saving = child("save").spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(30 + trial * 7));
+            saving.kill().unwrap();
+            saving.wait().unwrap();
+            let verify = child("verify").output().unwrap();
+            let loaded = String::from_utf8_lossy(&verify.stdout).contains("HNSW_CRASH_COUNT=");
+            if !verify.status.success() || !loaded {
+                broken.push(trial);
+            }
+        }
+        assert!(
+            broken.is_empty(),
+            "the dump could not be loaded after a kill in trials {broken:?}"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }
