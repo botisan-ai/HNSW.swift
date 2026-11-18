@@ -226,9 +226,40 @@ import Testing
 
     let dumps = try FileManager.default.contentsOfDirectory(atPath: testDir.path)
         .filter { $0.hasSuffix(".hnsw.graph") || $0.hasSuffix(".hnsw.data") }.sorted()
-    #expect(dumps == ["test_index.hnsw.data", "test_index.hnsw.graph"])
+    #expect(dumps == ["test_index.r2.hnsw.data", "test_index.r2.hnsw.graph"])
 
     let reloaded = try HnswIndex.load(directory: testDir.path, basename: "test_index", dimension: 4, distanceType: .cosine)
     #expect(try await reloaded.count() == 3)
+    #expect(try await reloaded.search(query: [0.0, 0.0, 1.0, 0.0], k: 1).first?.id == 300)
+}
+
+@Test func testAFailedSaveKeepsThePreviousDumpAndTheIndexUsable() async throws {
+    let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("hnsw_failed_save_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+    defer {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: testDir.path)
+        try? FileManager.default.removeItem(at: testDir)
+    }
+
+    let index = HnswIndex(maxConnections: 16, maxElements: 1000, maxLayers: 16, efConstruction: 200, dimension: 4, distanceType: .cosine)
+    try await index.insert(vector: [1.0, 0.0, 0.0, 0.0], id: 100)
+    try await index.insert(vector: [0.0, 1.0, 0.0, 0.0], id: 200)
+    try await index.save(directory: testDir.path, basename: "test_index")
+
+    let loaded = try HnswIndex.load(directory: testDir.path, basename: "test_index", dimension: 4, distanceType: .cosine)
+    try await loaded.insert(vector: [0.0, 0.0, 1.0, 0.0], id: 300)
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: testDir.path)
+    do {
+        try await loaded.save(directory: testDir.path, basename: "test_index")
+        Issue.record("a save into a read-only directory must throw")
+    } catch {
+        #expect(!String(describing: error).contains("rustPanic"), "\(error)")
+    }
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: testDir.path)
+
+    let previous = try HnswIndex.load(directory: testDir.path, basename: "test_index", dimension: 4, distanceType: .cosine)
+    #expect(try await previous.count() == 2)
+    try await loaded.save(directory: testDir.path, basename: "test_index")
+    let reloaded = try HnswIndex.load(directory: testDir.path, basename: "test_index", dimension: 4, distanceType: .cosine)
     #expect(try await reloaded.search(query: [0.0, 0.0, 1.0, 0.0], k: 1).first?.id == 300)
 }
