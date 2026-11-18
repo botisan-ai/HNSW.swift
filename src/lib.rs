@@ -443,9 +443,18 @@ impl DumpFiles<'_> {
         if let Some(error) = killed(PublishStep::RemoveOthers) {
             return Err(error);
         }
-        let _ = std::fs::File::open(self.directory).and_then(|directory| directory.sync_all());
+        let _ = self.sync_directory();
         self.remove_all_but(&revision);
         Ok(())
+    }
+
+    /// Makes the pointer's rename durable.
+    fn sync_directory(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if tests::FAIL_DIRECTORY_SYNC.with(|fail| fail.get()) {
+            return Err(std::io::Error::from_raw_os_error(5));
+        }
+        std::fs::File::open(self.directory)?.sync_all()
     }
 
     /// Flushes the written pair, then atomically points the pointer at it. Nothing is published unless this succeeds.
@@ -735,6 +744,10 @@ uniffi::setup_scaffolding!();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        pub(crate) static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
     use hnsw_rs::hnsw::PointId;
 
     fn cosine_config(dimension: u32) -> HnswIndexConfig {
@@ -1272,5 +1285,88 @@ mod tests {
             );
             std::fs::remove_dir_all(&directory).unwrap();
         }
+    }
+
+    fn cosine_dump(index: &HnswIndex) -> impl FnOnce(&Path, &str) -> Result<String, String> + '_ {
+        move |directory, revision| match &*index.inner.lock().unwrap() {
+            HnswIndexInner::Cosine(inner) => inner
+                .hnsw
+                .file_dump(directory, revision)
+                .map_err(|e| e.to_string()),
+            _ => unreachable!(),
+        }
+    }
+
+    /// The reviewer's interleaving: A publishes r2 and pauses before its cleanup, B loads r2 and publishes r3, then A's
+    /// cleanup runs.
+    #[test]
+    fn a_save_that_resumes_after_another_handle_published_keeps_the_published_pair() {
+        let directory = scratch("two-handles");
+        let (first, config, path) = loaded_with_unsaved_point(&directory);
+        let files = DumpFiles {
+            directory: &directory,
+            basename: "hnsw",
+        };
+        assert!(
+            files
+                .publish_until(cosine_dump(&first), Some(PublishStep::RemoveOthers))
+                .is_err()
+        );
+        assert_eq!(files.published().as_deref(), Some("hnsw.r2"));
+
+        let second = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        second
+            .insert(unit(vector("saved by the second handle", 2.0, 32)), 41)
+            .unwrap();
+        second.save(path.clone(), "hnsw".into()).unwrap();
+        assert_eq!(files.published().as_deref(), Some("hnsw.r3"));
+
+        files.remove_all_but("hnsw.r2");
+        let reloaded = HnswIndex::load(path, "hnsw".into(), config).unwrap_or_else(|error| {
+            panic!(
+                "the published pair must survive the other handle's cleanup: {error:?}, files {:?}",
+                dump_files(&directory)
+            )
+        });
+        assert_eq!(reloaded.len().unwrap(), 42);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_directory_sync_failure_after_publishing_keeps_both_pairs_and_fails_the_save() {
+        let directory = scratch("directory-sync");
+        let (loaded, config, path) = loaded_with_unsaved_point(&directory);
+        FAIL_DIRECTORY_SYNC.with(|fail| fail.set(true));
+        let failed = loaded.save(path.clone(), "hnsw".into());
+        FAIL_DIRECTORY_SYNC.with(|fail| fail.set(false));
+        assert!(
+            matches!(failed, Err(HnswError::DumpError(_))),
+            "an unconfirmed publication is reported: {failed:?}"
+        );
+        assert_eq!(
+            dump_files(&directory),
+            [
+                "hnsw.r1.hnsw.data",
+                "hnsw.r1.hnsw.graph",
+                "hnsw.r2.hnsw.data",
+                "hnsw.r2.hnsw.graph"
+            ],
+            "both the published pair and the previous one are kept"
+        );
+        assert_eq!(
+            HnswIndex::load(path.clone(), "hnsw".into(), config)
+                .unwrap()
+                .len()
+                .unwrap(),
+            41
+        );
+
+        loaded.save(path.clone(), "hnsw".into()).unwrap();
+        assert_eq!(
+            dump_files(&directory),
+            ["hnsw.r3.hnsw.data", "hnsw.r3.hnsw.graph"],
+            "the next save cleans up"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }
