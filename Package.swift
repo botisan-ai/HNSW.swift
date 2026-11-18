@@ -11,8 +11,8 @@ if useLocalFramework {
         path: "./build/libhnsw-rs.xcframework"
     )
 } else {
-    let releaseTag = "0.2.3"
-    let releaseChecksum = "46f4f092135d38929f6f0ccb3d7897818ddf352fb2584533afcc2f9b6175e4d1"
+    let releaseTag = "0.2.4"
+    let releaseChecksum = "133ee8bba414b6d2a42bb67d990050217eaf285aaeae3f9ebaeed21d5c270937"
     binaryTarget = .binaryTarget(
         name: "HnswRS",
         url:
