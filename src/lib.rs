@@ -766,4 +766,67 @@ mod tests {
             }
         }
     }
+
+    fn dump_files(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".hnsw.graph") || name.ends_with(".hnsw.data"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn unit(mut point: Vec<f32>) -> Vec<f32> {
+        let norm = point.iter().map(|x| x * x).sum::<f32>().sqrt();
+        point.iter_mut().for_each(|x| *x /= norm);
+        point
+    }
+
+    #[test]
+    fn a_loaded_index_saves_over_its_own_dump() {
+        for distance in [
+            DistanceType::L1,
+            DistanceType::L2,
+            DistanceType::Cosine,
+            DistanceType::Dot,
+        ] {
+            let directory = std::env::temp_dir().join(format!(
+                "hnsw-resave-{distance:?}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            let path = directory.to_string_lossy().into_owned();
+            let config = HnswIndexConfig {
+                distance,
+                ..cosine_config(32)
+            };
+
+            let first = HnswIndex::new(config);
+            for id in 0..40 {
+                first
+                    .insert(unit(vector(&format!("point {id}"), 2.0, 32)), id)
+                    .unwrap();
+            }
+            first.save(path.clone(), "hnsw".into()).unwrap();
+
+            let loaded = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+            let saved_after_reload = unit(vector("saved after a reload", 2.0, 32));
+            loaded.insert(saved_after_reload.clone(), 40).unwrap();
+            loaded.save(path.clone(), "hnsw".into()).unwrap();
+            assert_eq!(
+                dump_files(&directory),
+                ["hnsw.hnsw.data", "hnsw.hnsw.graph"],
+                "{distance:?}: saving a loaded index must replace its dump, not add a numbered copy"
+            );
+
+            let reloaded = HnswIndex::load(path, "hnsw".into(), config).unwrap();
+            assert!(
+                found_ids(&reloaded, saved_after_reload, 5).contains(&40),
+                "{distance:?}: a point saved after a reload must be there after the next reload"
+            );
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
+    }
 }
