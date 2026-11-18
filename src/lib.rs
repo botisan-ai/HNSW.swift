@@ -256,6 +256,9 @@ impl HnswIndexInner {
         }
     }
 
+    /// Loads through `load_hnsw_with_dist`: hnsw_rs's `load_hnsw` marks the graph as memory-mapped even when it reads
+    /// the data into memory, and `file_dump` then never overwrites, so every save of a loaded index wrote a new
+    /// `<basename>-<n>` pair beside the stale one.
     fn load(
         directory: String,
         basename: String,
@@ -268,7 +271,7 @@ impl HnswIndexInner {
                 let io_ptr = Box::into_raw(io);
                 let hnsw: Hnsw<'static, f32, DistL1> = unsafe {
                     (*io_ptr)
-                        .load_hnsw()
+                        .load_hnsw_with_dist(DistL1 {})
                         .map_err(|e| HnswError::ReloadError(e.to_string()))?
                 };
                 Ok(HnswIndexInner::L1(HnswInnerL1 {
@@ -281,7 +284,7 @@ impl HnswIndexInner {
                 let io_ptr = Box::into_raw(io);
                 let hnsw: Hnsw<'static, f32, DistL2> = unsafe {
                     (*io_ptr)
-                        .load_hnsw()
+                        .load_hnsw_with_dist(DistL2 {})
                         .map_err(|e| HnswError::ReloadError(e.to_string()))?
                 };
                 Ok(HnswIndexInner::L2(HnswInnerL2 {
@@ -294,7 +297,7 @@ impl HnswIndexInner {
                 let io_ptr = Box::into_raw(io);
                 let hnsw: Hnsw<'static, f32, DistCosine> = unsafe {
                     (*io_ptr)
-                        .load_hnsw()
+                        .load_hnsw_with_dist(DistCosine {})
                         .map_err(|e| HnswError::ReloadError(e.to_string()))?
                 };
                 Ok(HnswIndexInner::Cosine(HnswInnerCosine {
@@ -307,7 +310,7 @@ impl HnswIndexInner {
                 let io_ptr = Box::into_raw(io);
                 let hnsw: Hnsw<'static, f32, DistDot> = unsafe {
                     (*io_ptr)
-                        .load_hnsw()
+                        .load_hnsw_with_dist(DistDot {})
                         .map_err(|e| HnswError::ReloadError(e.to_string()))?
                 };
                 Ok(HnswIndexInner::Dot(HnswInnerDot {
