@@ -84,46 +84,6 @@ public actor HnswIndex {
         self.config = config
     }
 
-    private static func tombstoneURL(directory: String, basename: String) -> URL {
-        URL(fileURLWithPath: directory)
-            .appendingPathComponent("\(basename).deleted")
-    }
-
-    private static func loadTombstones(directory: String, basename: String) -> Set<UInt64> {
-        let url = tombstoneURL(directory: directory, basename: basename)
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
-            return []
-        }
-
-        var ids: Set<UInt64> = []
-        let chunkSize = MemoryLayout<UInt64>.size
-        guard data.count % chunkSize == 0 else {
-            return []
-        }
-
-        data.withUnsafeBytes { raw in
-            for offset in stride(from: 0, to: data.count, by: chunkSize) {
-                let value = raw.load(fromByteOffset: offset, as: UInt64.self)
-                ids.insert(UInt64(littleEndian: value))
-            }
-        }
-
-        return ids
-    }
-
-    private static func saveTombstones(_ ids: Set<UInt64>, directory: String, basename: String) throws {
-        let url = tombstoneURL(directory: directory, basename: basename)
-        var data = Data()
-        data.reserveCapacity(ids.count * MemoryLayout<UInt64>.size)
-
-        for id in ids.sorted() {
-            var value = id.littleEndian
-            withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
-        }
-
-        try data.write(to: url, options: .atomic)
-    }
-    
     public static func load(
         directory: String,
         basename: String,
@@ -145,7 +105,7 @@ public actor HnswIndex {
             basename: basename,
             config: loadConfig
         )
-        let deletedIds = loadTombstones(directory: directory, basename: basename)
+        let deletedIds = Set(ffiIndex.loadedDeletedIds())
         return HnswIndex(index: ffiIndex, distanceType: distanceType, deletedIds: deletedIds, config: config)
     }
     
@@ -214,12 +174,7 @@ public actor HnswIndex {
     }
     
     public func save(directory: String, basename: String) throws {
-        try index.save(directory: directory, basename: basename)
-        do {
-            try Self.saveTombstones(deletedIds, directory: directory, basename: basename)
-        } catch {
-            throw HnswSwiftError.saveFailed(error.localizedDescription)
-        }
+        try index.saveWithDeletedIds(directory: directory, basename: basename, deletedIds: Array(deletedIds))
     }
     
     public func setSearchingMode(enabled: Bool) throws {

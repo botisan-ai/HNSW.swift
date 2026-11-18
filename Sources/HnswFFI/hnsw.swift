@@ -546,7 +546,17 @@ public protocol HnswIndexProtocol: AnyObject, Sendable {
     
     func len() throws  -> UInt64
     
+    /**
+     * The deleted ids saved with the dump this index was loaded from.
+     */
+    func loadedDeletedIds()  -> [UInt64]
+    
     func save(directory: String, basename: String) throws 
+    
+    /**
+     * Saves the graph with the ids the caller has deleted, read back by `loaded_deleted_ids` after a load.
+     */
+    func saveWithDeletedIds(directory: String, basename: String, deletedIds: [UInt64]) throws 
     
     func search(query: [Float], k: UInt32, efSearch: UInt32) throws  -> [SearchResult]
     
@@ -671,11 +681,35 @@ open func len()throws  -> UInt64  {
 })
 }
     
+    /**
+     * The deleted ids saved with the dump this index was loaded from.
+     */
+open func loadedDeletedIds() -> [UInt64]  {
+    return try!  FfiConverterSequenceUInt64.lift(try! rustCall() {
+    uniffi_hnsw_fn_method_hnswindex_loaded_deleted_ids(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
 open func save(directory: String, basename: String)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
     uniffi_hnsw_fn_method_hnswindex_save(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(directory),
         FfiConverterString.lower(basename),$0
+    )
+}
+}
+    
+    /**
+     * Saves the graph with the ids the caller has deleted, read back by `loaded_deleted_ids` after a load.
+     */
+open func saveWithDeletedIds(directory: String, basename: String, deletedIds: [UInt64])throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
+    uniffi_hnsw_fn_method_hnswindex_save_with_deleted_ids(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(directory),
+        FfiConverterString.lower(basename),
+        FfiConverterSequenceUInt64.lower(deletedIds),$0
     )
 }
 }
@@ -1198,7 +1232,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_hnsw_checksum_method_hnswindex_len() != 807) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_hnsw_checksum_method_hnswindex_loaded_deleted_ids() != 38279) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_hnsw_checksum_method_hnswindex_save() != 38703) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hnsw_checksum_method_hnswindex_save_with_deleted_ids() != 64652) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hnsw_checksum_method_hnswindex_search() != 8428) {

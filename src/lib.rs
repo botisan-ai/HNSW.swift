@@ -291,6 +291,44 @@ impl HnswIndexInner {
     }
 }
 
+/// Deleted ids as little-endian u64s, the format HnswSwift has always written. A missing or malformed file is empty.
+fn read_tombstones(path: &Path) -> Vec<u64> {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.len() % 8 == 0 => bytes
+            .chunks_exact(8)
+            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Writes `ids` sorted, through a synced temporary file renamed into place.
+fn write_tombstones(path: &Path, ids: &[u64]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let draft = path.with_extension("deleted.tmp");
+    let mut file = std::fs::File::create(&draft)?;
+    for id in sorted {
+        file.write_all(&id.to_le_bytes())?;
+    }
+    file.sync_all()?;
+    std::fs::rename(draft, path)
+}
+
+/// Takes `kind` on `file`.
+fn acquire(file: &std::fs::File, kind: Lock) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = tests::injected_lock_error() {
+        return Err(error);
+    }
+    match kind {
+        Lock::Shared => file.lock_shared(),
+        Lock::Exclusive => file.lock(),
+    }
+}
+
 type LoadedGraph<D> = (ManuallyDrop<Hnsw<'static, f32, D>>, Option<NonNull<HnswIo>>);
 
 /// Reads one dump pair. The `HnswIo` the graph borrows is owned by the caller once this succeeds, and freed here when it
@@ -472,10 +510,7 @@ impl DumpFiles<'_> {
                 Lock::Shared => std::fs::File::open(&path),
                 Lock::Exclusive => Err(error),
             })?;
-        match kind {
-            Lock::Shared => file.lock_shared()?,
-            Lock::Exclusive => file.lock()?,
-        }
+        acquire(&file, kind)?;
         Ok(file)
     }
 
@@ -572,6 +607,7 @@ pub struct HnswIndex {
     inner: Mutex<HnswIndexInner>,
     dimension: u32,
     distance: DistanceType,
+    loaded_deleted_ids: Vec<u64>,
 }
 
 #[uniffi::export]
@@ -584,6 +620,7 @@ impl HnswIndex {
             inner: Mutex::new(HnswIndexInner::new(config)),
             dimension,
             distance,
+            loaded_deleted_ids: Vec::new(),
         }
     }
 
@@ -595,11 +632,14 @@ impl HnswIndex {
     ) -> Result<Self, HnswError> {
         let dimension = config.dimension;
         let distance = config.distance;
-        let inner = HnswIndexInner::load(directory, basename, distance)?;
+        let inner = HnswIndexInner::load(directory.clone(), basename.clone(), distance)?;
+        let loaded_deleted_ids =
+            read_tombstones(&Path::new(&directory).join(format!("{basename}.deleted")));
         Ok(Self {
             inner: Mutex::new(inner),
             dimension,
             distance,
+            loaded_deleted_ids,
         })
     }
 
@@ -726,6 +766,34 @@ impl HnswIndex {
         })
     }
 
+    /// Saves the graph with the ids the caller has deleted, read back by `loaded_deleted_ids` after a load.
+    #[uniffi::method]
+    pub fn save_with_deleted_ids(
+        &self,
+        directory: String,
+        basename: String,
+        deleted_ids: Vec<u64>,
+    ) -> Result<(), HnswError> {
+        self.save(directory.clone(), basename.clone())?;
+        #[cfg(test)]
+        if tests::tombstone_hook() {
+            return Err(HnswError::DumpError(
+                "killed before the tombstones".to_string(),
+            ));
+        }
+        write_tombstones(
+            &Path::new(&directory).join(format!("{basename}.deleted")),
+            &deleted_ids,
+        )
+        .map_err(|error| HnswError::DumpError(error.to_string()))
+    }
+
+    /// The deleted ids saved with the dump this index was loaded from.
+    #[uniffi::method]
+    pub fn loaded_deleted_ids(&self) -> Vec<u64> {
+        self.loaded_deleted_ids.clone()
+    }
+
     #[uniffi::method]
     pub fn set_searching_mode(&self, enabled: bool) -> Result<(), HnswError> {
         let mut guard = self.inner.lock().map_err(|_| HnswError::LockError)?;
@@ -791,6 +859,7 @@ impl HnswIndex {
             inner: Mutex::new(inner),
             dimension: config.dimension,
             distance: config.distance,
+            loaded_deleted_ids: Vec::new(),
         })
     }
 }
@@ -803,6 +872,29 @@ mod tests {
 
     thread_local! {
         pub(crate) static FAIL_DIRECTORY_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static TOMBSTONE_HOOK: std::cell::RefCell<Option<Box<dyn Fn() -> bool>>> = const { std::cell::RefCell::new(None) };
+        static LOCK_ERRORS: std::cell::RefCell<Vec<std::io::ErrorKind>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Runs this thread's hook at the point where a save writes its tombstones; true abandons the save there, as if killed.
+    pub(crate) fn tombstone_hook() -> bool {
+        TOMBSTONE_HOOK.with(|hook| hook.borrow().as_ref().is_some_and(|hook| hook()))
+    }
+
+    fn on_tombstones(hook: impl Fn() -> bool + 'static) {
+        TOMBSTONE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// The next error queued for this thread's lock acquisitions.
+    pub(crate) fn injected_lock_error() -> Option<std::io::Error> {
+        LOCK_ERRORS.with(|errors| {
+            let mut errors = errors.borrow_mut();
+            (!errors.is_empty()).then(|| std::io::Error::from(errors.remove(0)))
+        })
+    }
+
+    fn fail_next_locks(kinds: &[std::io::ErrorKind]) {
+        LOCK_ERRORS.with(|errors| *errors.borrow_mut() = kinds.to_vec());
     }
     use hnsw_rs::hnsw::PointId;
 
@@ -1542,6 +1634,185 @@ mod tests {
                 .unwrap(),
             41
         );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    fn point(id: u64) -> Vec<f32> {
+        unit(vector(&format!("tombstone point {id}"), 2.0, 32))
+    }
+
+    /// Ids a fresh load finds in the graph, minus the deleted ids saved with it: what HnswSwift would return.
+    fn visible(path: &str, config: HnswIndexConfig) -> Vec<u64> {
+        let index = HnswIndex::load(path.to_string(), "hnsw".into(), config).unwrap();
+        let deleted: HashSet<u64> = index.loaded_deleted_ids().into_iter().collect();
+        let mut ids: Vec<u64> = index
+            .search(vec![0.01; 32], 1000, 1000)
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.id)
+            .filter(|id| !deleted.contains(id))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Live ids [10, 20], saved; then loaded back, 10 deleted and 30 inserted, not yet saved.
+    fn edited_after_save(name: &str) -> (std::path::PathBuf, String, HnswIndexConfig, HnswIndex) {
+        let directory = scratch(name);
+        let path = directory.to_string_lossy().into_owned();
+        let config = cosine_config(32);
+        let first = HnswIndex::new(config);
+        for id in [10, 20] {
+            first.insert(point(id), id).unwrap();
+        }
+        first
+            .save_with_deleted_ids(path.clone(), "hnsw".into(), vec![])
+            .unwrap();
+        let edited = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        edited.insert(point(30), 30).unwrap();
+        (directory, path, config, edited)
+    }
+
+    #[test]
+    fn a_save_killed_before_its_tombstones_restores_one_whole_generation() {
+        let (directory, path, config, edited) = edited_after_save("tombstones-killed");
+        on_tombstones(|| true);
+        let killed = edited.save_with_deleted_ids(path.clone(), "hnsw".into(), vec![10]);
+        on_tombstones(|| false);
+        assert!(killed.is_err());
+        let ids = visible(&path, config);
+        assert!(
+            ids == [10, 20] || ids == [20, 30],
+            "the previous or the new generation, never a mix: {ids:?}"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_directory_sync_failure_keeps_the_tombstones_with_their_graph() {
+        let (directory, path, config, edited) = edited_after_save("tombstones-sync");
+        FAIL_DIRECTORY_SYNC.with(|fail| fail.set(true));
+        let failed = edited.save_with_deleted_ids(path.clone(), "hnsw".into(), vec![10]);
+        FAIL_DIRECTORY_SYNC.with(|fail| fail.set(false));
+        assert!(failed.is_err());
+        let ids = visible(&path, config);
+        assert!(
+            ids == [10, 20] || ids == [20, 30],
+            "the previous or the new generation, never a mix: {ids:?}"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// The reviewer's overlap: A pauses where it writes its tombstones; B loads, deletes 20, inserts 40 and saves; then
+    /// A finishes. 20 must stay deleted.
+    #[test]
+    fn overlapping_saves_never_resurrect_a_deleted_id() {
+        let (directory, path, config, edited) = edited_after_save("tombstones-overlap");
+        let (paused_tx, paused) = std::sync::mpsc::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel::<()>();
+        let resume_rx = std::sync::Arc::new(Mutex::new(resume_rx));
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                let resume_rx = resume_rx.clone();
+                on_tombstones(move || {
+                    paused_tx.send(()).unwrap();
+                    resume_rx.lock().unwrap().recv().unwrap();
+                    false
+                });
+                edited.save_with_deleted_ids(path.clone(), "hnsw".into(), vec![10])
+            });
+            paused.recv().unwrap();
+            let b = scope.spawn(|| {
+                let other = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+                let mut deleted = other.loaded_deleted_ids();
+                deleted.push(20);
+                other.insert(point(40), 40).unwrap();
+                other.save_with_deleted_ids(path.clone(), "hnsw".into(), deleted)
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            resume.send(()).unwrap();
+            a.join().unwrap().unwrap();
+            b.join().unwrap().unwrap();
+        });
+        let ids = visible(&path, config);
+        assert!(
+            !ids.contains(&20),
+            "20 was deleted by a save that succeeded: {ids:?}"
+        );
+        assert_eq!(ids, [30, 40]);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A reader whose shared flock is interrupted while a writer holds the lock waits for the writer, as an
+    /// uninterrupted reader does.
+    #[test]
+    fn an_interrupted_shared_lock_is_retried_not_skipped() {
+        let directory = scratch("lock-eintr");
+        let (writer, config, path) = loaded_with_unsaved_point(&directory);
+        let (paused_tx, paused) = std::sync::mpsc::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel::<()>();
+        let resume_rx = Mutex::new(resume_rx);
+        let read_done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let write = scope.spawn(|| {
+                DumpFiles {
+                    directory: &directory,
+                    basename: "hnsw",
+                }
+                .publish_with(cosine_dump(&writer), |at| {
+                    if at == PublishStep::RenamePointer {
+                        paused_tx.send(()).unwrap();
+                        resume_rx.lock().unwrap().recv().unwrap();
+                    }
+                    false
+                })
+            });
+            paused.recv().unwrap();
+            let read = scope.spawn(|| {
+                fail_next_locks(&[std::io::ErrorKind::Interrupted]);
+                let loaded = HnswIndex::load(path.clone(), "hnsw".into(), config);
+                read_done.store(true, std::sync::atomic::Ordering::SeqCst);
+                loaded.map(|index| index.len().unwrap())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let finished_while_writing = read_done.load(std::sync::atomic::Ordering::SeqCst);
+            resume.send(()).unwrap();
+            write.join().unwrap().unwrap();
+            let loaded = read.join().unwrap();
+            assert!(
+                !finished_while_writing,
+                "the interrupted reader must not bypass the writer's lock"
+            );
+            assert_eq!(loaded.unwrap(), 41);
+        });
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_shared_lock_that_fails_fails_the_load() {
+        let directory = scratch("lock-error");
+        let (_, config, path) = loaded_with_unsaved_point(&directory);
+        fail_next_locks(&[std::io::ErrorKind::PermissionDenied]);
+        let loaded = HnswIndex::load(path, "hnsw".into(), config);
+        fail_next_locks(&[]);
+        assert!(
+            matches!(loaded, Err(HnswError::ReloadError(_))),
+            "a failed flock is not skipped: {:?}",
+            loaded.err()
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_dump_without_a_lock_file_still_loads() {
+        let directory = scratch("read-only-fixture");
+        let (_, config, path) = loaded_with_unsaved_point(&directory);
+        std::fs::remove_file(directory.join("hnsw.hnsw.lock")).unwrap();
+        set_mode(&directory, 0o555);
+        let loaded = HnswIndex::load(path, "hnsw".into(), config);
+        set_mode(&directory, 0o755);
+        assert_eq!(loaded.unwrap().len().unwrap(), 40);
+        assert!(!directory.join("hnsw.hnsw.lock").exists());
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }
