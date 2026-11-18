@@ -264,11 +264,12 @@ impl HnswIndexInner {
         distance: DistanceType,
     ) -> Result<Self, HnswError> {
         let directory = Path::new(&directory);
-        let current = DumpFiles {
+        let files = DumpFiles {
             directory,
             basename: &basename,
-        }
-        .current();
+        };
+        let _reading = files.lock(Lock::Shared).ok();
+        let current = files.current();
         Ok(match distance {
             DistanceType::L1 => {
                 let (hnsw, io_ptr) = load_graph(directory, &current, DistL1 {})?;
@@ -313,6 +314,12 @@ fn load_graph<D: Distance<f32> + Send + Sync>(
             }))
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Lock {
+    Shared,
+    Exclusive,
 }
 
 /// The steps of `DumpFiles::publish` after the pair is written, so tests can abandon it before each one.
@@ -391,30 +398,28 @@ impl DumpFiles<'_> {
             .unwrap_or_else(|| self.basename.to_string())
     }
 
-    /// Writes the next revision with `dump`, publishes it, then deletes every other pair of this basename.
+    /// Writes the next revision with `dump`, publishes it, then deletes every other pair of this basename. The whole
+    /// transaction holds `<basename>.hnsw.lock` exclusively, so saves through other handles and other processes wait.
     fn publish(
         &self,
         dump: impl FnOnce(&Path, &str) -> Result<String, String>,
     ) -> Result<(), HnswError> {
-        self.publish_until(dump, None)
+        self.publish_with(dump, |_| false)
     }
 
-    /// `publish`, abandoned before `stop` as if the process were killed there: nothing from `stop` on runs, cleanup
-    /// included.
-    fn publish_until(
+    /// `publish`, calling `at` before each step; `at` returning true abandons the save there as if the process were
+    /// killed: nothing from that step on runs, cleanup included.
+    fn publish_with(
         &self,
         dump: impl FnOnce(&Path, &str) -> Result<String, String>,
-        stop: Option<PublishStep>,
+        at: impl Fn(PublishStep) -> bool,
     ) -> Result<(), HnswError> {
-        let killed = |step| {
-            (stop == Some(step)).then(|| HnswError::DumpError(format!("killed before {step:?}")))
-        };
-        let next = self
-            .published()
-            .and_then(|revision| self.revision(&revision))
-            .unwrap_or(0)
-            + 1;
-        let revision = format!("{}.r{next}", self.basename);
+        let _publishing = self
+            .lock(Lock::Exclusive)
+            .map_err(|error| HnswError::DumpError(format!("could not lock the dump: {error}")))?;
+        let killed =
+            |step| at(step).then(|| HnswError::DumpError(format!("killed before {step:?}")));
+        let revision = format!("{}.r{}", self.basename, self.newest_revision() + 1);
         let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             dump(self.directory, &revision)
         }));
@@ -443,9 +448,53 @@ impl DumpFiles<'_> {
         if let Some(error) = killed(PublishStep::RemoveOthers) {
             return Err(error);
         }
-        let _ = self.sync_directory();
+        self.sync_directory().map_err(|error| {
+            HnswError::DumpError(format!(
+                "published {revision} but could not make it durable, so the previous dump is kept: {error}"
+            ))
+        })?;
         self.remove_all_but(&revision);
         Ok(())
+    }
+
+    /// Opens `<basename>.hnsw.lock` and locks it. Each open is its own lock, so handles in one process exclude each other
+    /// as handles in different processes do. A shared lock in a directory where the lock file can't be created is
+    /// skipped by the caller.
+    fn lock(&self, kind: Lock) -> std::io::Result<std::fs::File> {
+        let path = self.file(&format!("{}.hnsw.lock", self.basename));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .or_else(|error| match kind {
+                Lock::Shared => std::fs::File::open(&path),
+                Lock::Exclusive => Err(error),
+            })?;
+        match kind {
+            Lock::Shared => file.lock_shared()?,
+            Lock::Exclusive => file.lock()?,
+        }
+        Ok(file)
+    }
+
+    /// The highest revision number any file of this basename uses, so a new revision never reuses a name.
+    fn newest_revision(&self) -> u64 {
+        let pointed = self
+            .published()
+            .and_then(|revision| self.revision(&revision));
+        let on_disk = std::fs::read_dir(self.directory)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                Self::SUFFIXES
+                    .iter()
+                    .find_map(|suffix| name.strip_suffix(suffix))
+                    .and_then(|basename| self.revision(basename))
+            });
+        on_disk.chain(pointed).max().unwrap_or(0)
     }
 
     /// Makes the pointer's rename durable.
@@ -484,9 +533,16 @@ impl DumpFiles<'_> {
         std::fs::rename(self.pointer_draft(), self.pointer()).map_err(fail)
     }
 
-    /// Deletes this basename's other pairs: earlier revisions, the pair written before revisions, and the
+    /// Deletes this basename's pairs other than `revision` and the one the pointer names: earlier revisions, the pair written before revisions, and the
     /// `<basename>-<n>` copies that hnsw_rs wrote when it refused to overwrite a loaded graph's dump.
     fn remove_all_but(&self, revision: &str) {
+        let published = self.published();
+        let keep = |pair: &str| {
+            [Some(revision), published.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|kept| &kept[self.basename.len()..] == pair)
+        };
         let Ok(entries) = std::fs::read_dir(self.directory) else {
             return;
         };
@@ -498,9 +554,9 @@ impl DumpFiles<'_> {
                 continue;
             };
             let stale = pair.is_empty()
-                || pair.strip_prefix(".r").is_some_and(|n| {
-                    n.parse::<u64>().is_ok() && pair != &revision[self.basename.len()..]
-                })
+                || pair
+                    .strip_prefix(".r")
+                    .is_some_and(|n| n.parse::<u64>().is_ok() && !keep(pair))
                 || pair
                     .strip_prefix('-')
                     .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
@@ -1242,7 +1298,7 @@ mod tests {
                 directory: &directory,
                 basename: "hnsw",
             };
-            let abandoned = files.publish_until(
+            let abandoned = files.publish_with(
                 |directory, revision| match &*loaded.inner.lock().unwrap() {
                     HnswIndexInner::Cosine(inner) => inner
                         .hnsw
@@ -1250,7 +1306,7 @@ mod tests {
                         .map_err(|e| e.to_string()),
                     _ => unreachable!(),
                 },
-                Some(step),
+                |at| at == step,
             );
             assert!(abandoned.is_err(), "{step:?}");
             let expected = if step == PublishStep::RemoveOthers {
@@ -1309,7 +1365,7 @@ mod tests {
         };
         assert!(
             files
-                .publish_until(cosine_dump(&first), Some(PublishStep::RemoveOthers))
+                .publish_with(cosine_dump(&first), |at| at == PublishStep::RemoveOthers)
                 .is_err()
         );
         assert_eq!(files.published().as_deref(), Some("hnsw.r2"));
@@ -1366,6 +1422,125 @@ mod tests {
             dump_files(&directory),
             ["hnsw.r3.hnsw.data", "hnsw.r3.hnsw.graph"],
             "the next save cleans up"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A save paused inside its transaction holds the lock: a save through another handle waits for it, and both
+    /// publications survive in order.
+    #[test]
+    fn a_save_through_another_handle_waits_for_the_one_in_progress() {
+        let directory = scratch("lock-handles");
+        let (first, config, path) = loaded_with_unsaved_point(&directory);
+        let second = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        second
+            .insert(unit(vector("saved by the second handle", 2.0, 32)), 41)
+            .unwrap();
+        let (paused_tx, paused) = std::sync::mpsc::channel();
+        let (resume, resume_rx) = std::sync::mpsc::channel::<()>();
+        let resume_rx = Mutex::new(resume_rx);
+        let second_done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let first_save = scope.spawn(|| {
+                DumpFiles {
+                    directory: &directory,
+                    basename: "hnsw",
+                }
+                .publish_with(cosine_dump(&first), |at| {
+                    if at == PublishStep::RemoveOthers {
+                        paused_tx.send(()).unwrap();
+                        resume_rx.lock().unwrap().recv().unwrap();
+                    }
+                    false
+                })
+            });
+            paused.recv().unwrap();
+            let second_save = scope.spawn(|| {
+                let saved = second.save(path.clone(), "hnsw".into());
+                second_done.store(true, std::sync::atomic::Ordering::SeqCst);
+                saved
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let finished_while_paused = second_done.load(std::sync::atomic::Ordering::SeqCst);
+            resume.send(()).unwrap();
+            first_save.join().unwrap().unwrap();
+            second_save.join().unwrap().unwrap();
+            assert!(
+                !finished_while_paused,
+                "the second save waits for the first transaction"
+            );
+        });
+        let files = DumpFiles {
+            directory: &directory,
+            basename: "hnsw",
+        };
+        assert_eq!(files.published().as_deref(), Some("hnsw.r3"));
+        assert_eq!(
+            dump_files(&directory),
+            ["hnsw.r3.hnsw.data", "hnsw.r3.hnsw.graph"]
+        );
+        assert_eq!(
+            HnswIndex::load(path, "hnsw".into(), config)
+                .unwrap()
+                .len()
+                .unwrap(),
+            41
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// The child side of `a_save_waits_for_a_lock_held_by_another_process`.
+    #[test]
+    #[ignore = "run by a_save_waits_for_a_lock_held_by_another_process"]
+    fn lock_holder_child() {
+        let Ok(path) = std::env::var("HNSW_LOCK_DIR") else {
+            return;
+        };
+        let directory = Path::new(&path);
+        let _held = DumpFiles {
+            directory,
+            basename: "hnsw",
+        }
+        .lock(Lock::Exclusive)
+        .unwrap();
+        println!("HNSW_LOCK_HELD");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn a_save_waits_for_a_lock_held_by_another_process() {
+        use std::io::BufRead;
+        let directory = scratch("lock-process");
+        let (loaded, config, path) = loaded_with_unsaved_point(&directory);
+        let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "tests::lock_holder_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("HNSW_LOCK_DIR", &path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(holder.stdout.take().unwrap()).lines();
+        assert!(lines.any(|line| line.unwrap().contains("HNSW_LOCK_HELD")));
+        let started = std::time::Instant::now();
+        loaded.save(path.clone(), "hnsw".into()).unwrap();
+        let waited = started.elapsed();
+        holder.wait().unwrap();
+        assert!(
+            waited >= std::time::Duration::from_millis(1000),
+            "the save waited for the other process: {waited:?}"
+        );
+        assert_eq!(
+            HnswIndex::load(path, "hnsw".into(), config)
+                .unwrap()
+                .len()
+                .unwrap(),
+            41
         );
         std::fs::remove_dir_all(&directory).unwrap();
     }
