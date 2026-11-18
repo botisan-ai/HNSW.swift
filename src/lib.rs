@@ -256,67 +256,247 @@ impl HnswIndexInner {
         }
     }
 
-    /// Loads through `load_hnsw_with_dist`: hnsw_rs's `load_hnsw` marks the graph as memory-mapped even when it reads
-    /// the data into memory, and `file_dump` then never overwrites, so every save of a loaded index wrote a new
-    /// `<basename>-<n>` pair beside the stale one.
+    /// Loads the published dump (see `DumpFiles`) through `load_hnsw_with_dist`: hnsw_rs's `load_hnsw` marks the graph
+    /// as memory-mapped even when it reads the data into memory, and `file_dump` then never overwrites.
     fn load(
         directory: String,
         basename: String,
         distance: DistanceType,
     ) -> Result<Self, HnswError> {
-        let dir_path = Path::new(&directory);
-        match distance {
+        let directory = Path::new(&directory);
+        let current = DumpFiles {
+            directory,
+            basename: &basename,
+        }
+        .current();
+        Ok(match distance {
             DistanceType::L1 => {
-                let io = Box::new(HnswIo::new(dir_path, &basename));
-                let io_ptr = Box::into_raw(io);
-                let hnsw: Hnsw<'static, f32, DistL1> = unsafe {
-                    (*io_ptr)
-                        .load_hnsw_with_dist(DistL1 {})
-                        .map_err(|e| HnswError::ReloadError(e.to_string()))?
-                };
-                Ok(HnswIndexInner::L1(HnswInnerL1 {
-                    hnsw: ManuallyDrop::new(hnsw),
-                    io_ptr: NonNull::new(io_ptr),
-                }))
+                let (hnsw, io_ptr) = load_graph(directory, &current, DistL1 {})?;
+                HnswIndexInner::L1(HnswInnerL1 { hnsw, io_ptr })
             }
             DistanceType::L2 => {
-                let io = Box::new(HnswIo::new(dir_path, &basename));
-                let io_ptr = Box::into_raw(io);
-                let hnsw: Hnsw<'static, f32, DistL2> = unsafe {
-                    (*io_ptr)
-                        .load_hnsw_with_dist(DistL2 {})
-                        .map_err(|e| HnswError::ReloadError(e.to_string()))?
-                };
-                Ok(HnswIndexInner::L2(HnswInnerL2 {
-                    hnsw: ManuallyDrop::new(hnsw),
-                    io_ptr: NonNull::new(io_ptr),
-                }))
+                let (hnsw, io_ptr) = load_graph(directory, &current, DistL2 {})?;
+                HnswIndexInner::L2(HnswInnerL2 { hnsw, io_ptr })
             }
             DistanceType::Cosine => {
-                let io = Box::new(HnswIo::new(dir_path, &basename));
-                let io_ptr = Box::into_raw(io);
-                let hnsw: Hnsw<'static, f32, DistCosine> = unsafe {
-                    (*io_ptr)
-                        .load_hnsw_with_dist(DistCosine {})
-                        .map_err(|e| HnswError::ReloadError(e.to_string()))?
-                };
-                Ok(HnswIndexInner::Cosine(HnswInnerCosine {
-                    hnsw: ManuallyDrop::new(hnsw),
-                    io_ptr: NonNull::new(io_ptr),
-                }))
+                let (hnsw, io_ptr) = load_graph(directory, &current, DistCosine {})?;
+                HnswIndexInner::Cosine(HnswInnerCosine { hnsw, io_ptr })
             }
             DistanceType::Dot => {
-                let io = Box::new(HnswIo::new(dir_path, &basename));
-                let io_ptr = Box::into_raw(io);
-                let hnsw: Hnsw<'static, f32, DistDot> = unsafe {
-                    (*io_ptr)
-                        .load_hnsw_with_dist(DistDot {})
-                        .map_err(|e| HnswError::ReloadError(e.to_string()))?
-                };
-                Ok(HnswIndexInner::Dot(HnswInnerDot {
-                    hnsw: ManuallyDrop::new(hnsw),
-                    io_ptr: NonNull::new(io_ptr),
-                }))
+                let (hnsw, io_ptr) = load_graph(directory, &current, DistDot {})?;
+                HnswIndexInner::Dot(HnswInnerDot { hnsw, io_ptr })
+            }
+        })
+    }
+}
+
+type LoadedGraph<D> = (ManuallyDrop<Hnsw<'static, f32, D>>, Option<NonNull<HnswIo>>);
+
+/// Reads one dump pair. The `HnswIo` the graph borrows is owned by the caller once this succeeds, and freed here when it
+/// fails or hnsw_rs panics.
+fn load_graph<D: Distance<f32> + Send + Sync>(
+    directory: &Path,
+    basename: &str,
+    distance: D,
+) -> Result<LoadedGraph<D>, HnswError> {
+    let io_ptr = Box::into_raw(Box::new(HnswIo::new(directory, basename)));
+    let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        (*io_ptr).load_hnsw_with_dist(distance)
+    }));
+    match loaded {
+        Ok(Ok(hnsw)) => Ok((ManuallyDrop::new(hnsw), NonNull::new(io_ptr))),
+        failed => {
+            drop(unsafe { Box::from_raw(io_ptr) });
+            Err(HnswError::ReloadError(match failed {
+                Ok(Err(error)) => error.to_string(),
+                _ => "hnsw_rs panicked while reading the dump".to_string(),
+            }))
+        }
+    }
+}
+
+/// The steps of `DumpFiles::publish` after the pair is written, so tests can abandon it before each one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PublishStep {
+    SyncPair,
+    WritePointer,
+    RenamePointer,
+    RemoveOthers,
+}
+
+enum Publication {
+    /// Abandoned by a test as if the process were killed: nothing is cleaned up.
+    Killed(HnswError),
+    Failed(String),
+}
+
+impl From<String> for Publication {
+    fn from(message: String) -> Self {
+        Publication::Failed(message)
+    }
+}
+
+/// A dump's files in `directory`. A save writes a complete `<basename>.r<n>.hnsw.{graph,data}` pair, flushes it to disk,
+/// and only then renames `<basename>.hnsw.current` to name it; that rename is the only point where the published dump
+/// changes, so a failed or killed save leaves the previous pair published. A directory without the pointer holds a dump
+/// written before revisions, in the `<basename>.hnsw.{graph,data}` pair.
+struct DumpFiles<'a> {
+    directory: &'a Path,
+    basename: &'a str,
+}
+
+impl DumpFiles<'_> {
+    const SUFFIXES: [&'static str; 2] = [".hnsw.graph", ".hnsw.data"];
+
+    fn file(&self, name: &str) -> std::path::PathBuf {
+        self.directory.join(name)
+    }
+
+    fn pointer(&self) -> std::path::PathBuf {
+        self.file(&format!("{}.hnsw.current", self.basename))
+    }
+
+    fn pointer_draft(&self) -> std::path::PathBuf {
+        self.file(&format!("{}.hnsw.current.tmp", self.basename))
+    }
+
+    fn pair(&self, basename: &str) -> [std::path::PathBuf; 2] {
+        Self::SUFFIXES.map(|suffix| self.file(&format!("{basename}{suffix}")))
+    }
+
+    fn revision(&self, basename: &str) -> Option<u64> {
+        basename
+            .strip_prefix(self.basename)?
+            .strip_prefix(".r")?
+            .parse()
+            .ok()
+    }
+
+    /// The revision the pointer names, if both of its files exist.
+    fn published(&self) -> Option<String> {
+        let revision = std::fs::read_to_string(self.pointer())
+            .ok()?
+            .trim()
+            .to_string();
+        self.revision(&revision)?;
+        self.pair(&revision)
+            .iter()
+            .all(|file| file.is_file())
+            .then_some(revision)
+    }
+
+    /// The pair a load reads: the published revision, else the pair written before revisions.
+    fn current(&self) -> String {
+        self.published()
+            .unwrap_or_else(|| self.basename.to_string())
+    }
+
+    /// Writes the next revision with `dump`, publishes it, then deletes every other pair of this basename.
+    fn publish(
+        &self,
+        dump: impl FnOnce(&Path, &str) -> Result<String, String>,
+    ) -> Result<(), HnswError> {
+        self.publish_until(dump, None)
+    }
+
+    /// `publish`, abandoned before `stop` as if the process were killed there: nothing from `stop` on runs, cleanup
+    /// included.
+    fn publish_until(
+        &self,
+        dump: impl FnOnce(&Path, &str) -> Result<String, String>,
+        stop: Option<PublishStep>,
+    ) -> Result<(), HnswError> {
+        let killed = |step| {
+            (stop == Some(step)).then(|| HnswError::DumpError(format!("killed before {step:?}")))
+        };
+        let next = self
+            .published()
+            .and_then(|revision| self.revision(&revision))
+            .unwrap_or(0)
+            + 1;
+        let revision = format!("{}.r{next}", self.basename);
+        let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dump(self.directory, &revision)
+        }));
+        let committed = match written {
+            Ok(Ok(name)) if name == revision => {
+                if let Some(error) = killed(PublishStep::SyncPair) {
+                    return Err(error);
+                }
+                self.commit(&revision, killed)
+            }
+            Ok(Ok(name)) => Err(format!("the dump was written as {name}, not {revision}").into()),
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => Err("hnsw_rs panicked while writing the dump".to_string().into()),
+        };
+        match committed {
+            Ok(()) => {}
+            Err(Publication::Killed(error)) => return Err(error),
+            Err(Publication::Failed(message)) => {
+                for file in self.pair(&revision) {
+                    let _ = std::fs::remove_file(file);
+                }
+                let _ = std::fs::remove_file(self.pointer_draft());
+                return Err(HnswError::DumpError(message));
+            }
+        }
+        if let Some(error) = killed(PublishStep::RemoveOthers) {
+            return Err(error);
+        }
+        let _ = std::fs::File::open(self.directory).and_then(|directory| directory.sync_all());
+        self.remove_all_but(&revision);
+        Ok(())
+    }
+
+    /// Flushes the written pair, then atomically points the pointer at it. Nothing is published unless this succeeds.
+    fn commit(
+        &self,
+        revision: &str,
+        killed: impl Fn(PublishStep) -> Option<HnswError>,
+    ) -> Result<(), Publication> {
+        use std::io::Write;
+        let fail = |error: std::io::Error| Publication::Failed(error.to_string());
+        for file in self.pair(revision) {
+            std::fs::File::open(file)
+                .and_then(|file| file.sync_all())
+                .map_err(fail)?;
+        }
+        if let Some(error) = killed(PublishStep::WritePointer) {
+            return Err(Publication::Killed(error));
+        }
+        let mut draft = std::fs::File::create(self.pointer_draft()).map_err(fail)?;
+        draft
+            .write_all(format!("{revision}\n").as_bytes())
+            .map_err(fail)?;
+        draft.sync_all().map_err(fail)?;
+        if let Some(error) = killed(PublishStep::RenamePointer) {
+            return Err(Publication::Killed(error));
+        }
+        std::fs::rename(self.pointer_draft(), self.pointer()).map_err(fail)
+    }
+
+    /// Deletes this basename's other pairs: earlier revisions, the pair written before revisions, and the
+    /// `<basename>-<n>` copies that hnsw_rs wrote when it refused to overwrite a loaded graph's dump.
+    fn remove_all_but(&self, revision: &str) {
+        let Ok(entries) = std::fs::read_dir(self.directory) else {
+            return;
+        };
+        for name in entries.filter_map(|entry| entry.ok()?.file_name().into_string().ok()) {
+            let Some(pair) = Self::SUFFIXES
+                .iter()
+                .find_map(|suffix| name.strip_prefix(self.basename)?.strip_suffix(suffix))
+            else {
+                continue;
+            };
+            let stale = pair.is_empty()
+                || pair.strip_prefix(".r").is_some_and(|n| {
+                    n.parse::<u64>().is_ok() && pair != &revision[self.basename.len()..]
+                })
+                || pair
+                    .strip_prefix('-')
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+            if stale {
+                let _ = std::fs::remove_file(self.file(&name));
             }
         }
     }
@@ -466,26 +646,19 @@ impl HnswIndex {
     #[uniffi::method]
     pub fn save(&self, directory: String, basename: String) -> Result<(), HnswError> {
         let guard = self.inner.lock().map_err(|_| HnswError::LockError)?;
-        let path = Path::new(&directory);
-        match &*guard {
-            HnswIndexInner::L2(inner) => inner
-                .hnsw
-                .file_dump(path, &basename)
-                .map_err(|e| HnswError::DumpError(e.to_string()))?,
-            HnswIndexInner::Cosine(inner) => inner
-                .hnsw
-                .file_dump(path, &basename)
-                .map_err(|e| HnswError::DumpError(e.to_string()))?,
-            HnswIndexInner::Dot(inner) => inner
-                .hnsw
-                .file_dump(path, &basename)
-                .map_err(|e| HnswError::DumpError(e.to_string()))?,
-            HnswIndexInner::L1(inner) => inner
-                .hnsw
-                .file_dump(path, &basename)
-                .map_err(|e| HnswError::DumpError(e.to_string()))?,
+        let files = DumpFiles {
+            directory: Path::new(&directory),
+            basename: &basename,
         };
-        Ok(())
+        files.publish(|directory, revision| {
+            match &*guard {
+                HnswIndexInner::L2(inner) => inner.hnsw.file_dump(directory, revision),
+                HnswIndexInner::Cosine(inner) => inner.hnsw.file_dump(directory, revision),
+                HnswIndexInner::Dot(inner) => inner.hnsw.file_dump(directory, revision),
+                HnswIndexInner::L1(inner) => inner.hnsw.file_dump(directory, revision),
+            }
+            .map_err(|error| error.to_string())
+        })
     }
 
     #[uniffi::method]
@@ -818,7 +991,7 @@ mod tests {
             loaded.save(path.clone(), "hnsw".into()).unwrap();
             assert_eq!(
                 dump_files(&directory),
-                ["hnsw.hnsw.data", "hnsw.hnsw.graph"],
+                ["hnsw.r2.hnsw.data", "hnsw.r2.hnsw.graph"],
                 "{distance:?}: saving a loaded index must replace its dump, not add a numbered copy"
             );
 
@@ -848,8 +1021,8 @@ mod tests {
         first.save(path.clone(), "hnsw".into()).unwrap();
 
         let loaded = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
-        std::fs::write(directory.join("hnsw.hnsw.data"), b"replaced").unwrap();
-        std::fs::remove_file(directory.join("hnsw.hnsw.graph")).unwrap();
+        std::fs::write(directory.join("hnsw.r1.hnsw.data"), b"replaced").unwrap();
+        std::fs::remove_file(directory.join("hnsw.r1.hnsw.graph")).unwrap();
         for (id, point) in points.iter().enumerate() {
             assert!(
                 found_ids(&loaded, point.clone(), 5).contains(&(id as u64)),
@@ -1040,5 +1213,64 @@ mod tests {
             "the dump could not be loaded after a kill in trials {broken:?}"
         );
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_save_abandoned_before_any_step_leaves_one_whole_dump_loadable() {
+        for step in [
+            PublishStep::SyncPair,
+            PublishStep::WritePointer,
+            PublishStep::RenamePointer,
+            PublishStep::RemoveOthers,
+        ] {
+            let directory = scratch("abandoned-save");
+            let (loaded, config, path) = loaded_with_unsaved_point(&directory);
+            let files = DumpFiles {
+                directory: &directory,
+                basename: "hnsw",
+            };
+            let abandoned = files.publish_until(
+                |directory, revision| match &*loaded.inner.lock().unwrap() {
+                    HnswIndexInner::Cosine(inner) => inner
+                        .hnsw
+                        .file_dump(directory, revision)
+                        .map_err(|e| e.to_string()),
+                    _ => unreachable!(),
+                },
+                Some(step),
+            );
+            assert!(abandoned.is_err(), "{step:?}");
+            let expected = if step == PublishStep::RemoveOthers {
+                41
+            } else {
+                40
+            };
+            let after_crash =
+                HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap_or_else(|error| {
+                    panic!("{step:?}: the dump must load after the save was abandoned: {error:?}")
+                });
+            assert_eq!(
+                after_crash.len().unwrap(),
+                expected,
+                "{step:?}: the previous pair before publication, the new one after"
+            );
+
+            loaded.save(path.clone(), "hnsw".into()).unwrap();
+            assert_eq!(
+                HnswIndex::load(path, "hnsw".into(), config)
+                    .unwrap()
+                    .len()
+                    .unwrap(),
+                41,
+                "{step:?}"
+            );
+            assert_eq!(
+                dump_files(&directory).len(),
+                2,
+                "{step:?}: the next save leaves one pair: {:?}",
+                dump_files(&directory)
+            );
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
     }
 }
