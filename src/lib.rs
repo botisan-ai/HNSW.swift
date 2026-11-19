@@ -262,15 +262,18 @@ impl HnswIndexInner {
         directory: String,
         basename: String,
         distance: DistanceType,
-    ) -> Result<Self, HnswError> {
+    ) -> Result<(Self, Vec<u64>), HnswError> {
         let directory = Path::new(&directory);
         let files = DumpFiles {
             directory,
             basename: &basename,
         };
-        let _reading = files.lock(Lock::Shared).ok();
+        let _reading = files
+            .lock(Lock::Shared)
+            .map_err(|error| HnswError::ReloadError(format!("could not lock the dump: {error}")))?;
         let current = files.current();
-        Ok(match distance {
+        let deleted_ids = read_tombstones(&files.tombstones_of(&current));
+        let inner = match distance {
             DistanceType::L1 => {
                 let (hnsw, io_ptr) = load_graph(directory, &current, DistL1 {})?;
                 HnswIndexInner::L1(HnswInnerL1 { hnsw, io_ptr })
@@ -287,7 +290,8 @@ impl HnswIndexInner {
                 let (hnsw, io_ptr) = load_graph(directory, &current, DistDot {})?;
                 HnswIndexInner::Dot(HnswInnerDot { hnsw, io_ptr })
             }
-        })
+        };
+        Ok((inner, deleted_ids))
     }
 }
 
@@ -302,19 +306,18 @@ fn read_tombstones(path: &Path) -> Vec<u64> {
     }
 }
 
-/// Writes `ids` sorted, through a synced temporary file renamed into place.
+/// Writes `ids` sorted into a revision that is not published yet; `DumpFiles::commit` syncs it with the graph.
 fn write_tombstones(path: &Path, ids: &[u64]) -> std::io::Result<()> {
-    use std::io::Write;
     let mut sorted = ids.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    let draft = path.with_extension("deleted.tmp");
-    let mut file = std::fs::File::create(&draft)?;
-    for id in sorted {
-        file.write_all(&id.to_le_bytes())?;
-    }
-    file.sync_all()?;
-    std::fs::rename(draft, path)
+    std::fs::write(
+        path,
+        sorted
+            .iter()
+            .flat_map(|id| id.to_le_bytes())
+            .collect::<Vec<u8>>(),
+    )
 }
 
 /// Takes `kind` on `file`.
@@ -381,17 +384,19 @@ impl From<String> for Publication {
     }
 }
 
-/// A dump's files in `directory`. A save writes a complete `<basename>.r<n>.hnsw.{graph,data}` pair, flushes it to disk,
-/// and only then renames `<basename>.hnsw.current` to name it; that rename is the only point where the published dump
-/// changes, so a failed or killed save leaves the previous pair published. A directory without the pointer holds a dump
-/// written before revisions, in the `<basename>.hnsw.{graph,data}` pair.
+/// A dump's files in `directory`. A save writes a complete revision, `<basename>.r<n>.hnsw.{graph,data}` and its deleted
+/// ids in `<basename>.r<n>.deleted`, flushes it to disk, and only then renames `<basename>.hnsw.current` to name it; that
+/// rename is the only point where the published dump changes, so a failed or killed save leaves the previous revision
+/// published, graph and deleted ids together. A directory without the pointer holds a dump written before revisions, in
+/// the `<basename>.hnsw.{graph,data}` pair with HnswSwift's `<basename>.deleted`.
 struct DumpFiles<'a> {
     directory: &'a Path,
     basename: &'a str,
 }
 
 impl DumpFiles<'_> {
-    const SUFFIXES: [&'static str; 2] = [".hnsw.graph", ".hnsw.data"];
+    /// Every file of a revision: its graph and data, written by hnsw_rs, and its deleted ids.
+    const REVISION_SUFFIXES: [&'static str; 3] = [".hnsw.graph", ".hnsw.data", ".deleted"];
 
     fn file(&self, name: &str) -> std::path::PathBuf {
         self.directory.join(name)
@@ -405,8 +410,21 @@ impl DumpFiles<'_> {
         self.file(&format!("{}.hnsw.current.tmp", self.basename))
     }
 
-    fn pair(&self, basename: &str) -> [std::path::PathBuf; 2] {
-        Self::SUFFIXES.map(|suffix| self.file(&format!("{basename}{suffix}")))
+    fn tombstones(&self, revision: &str) -> std::path::PathBuf {
+        self.file(&format!("{revision}.deleted"))
+    }
+
+    /// The deleted ids a load of `current` reads: its own `<revision>.deleted`, else the `<basename>.deleted` HnswSwift
+    /// wrote beside the graph before revisions carried them (a dump without the pointer, or one published by an
+    /// earlier 0.2.4 build).
+    fn tombstones_of(&self, current: &str) -> std::path::PathBuf {
+        Some(self.tombstones(current))
+            .filter(|own| current != self.basename && own.is_file())
+            .unwrap_or_else(|| self.tombstones(self.basename))
+    }
+
+    fn revision_files(&self, revision: &str) -> [std::path::PathBuf; 3] {
+        Self::REVISION_SUFFIXES.map(|suffix| self.file(&format!("{revision}{suffix}")))
     }
 
     fn revision(&self, basename: &str) -> Option<u64> {
@@ -417,14 +435,14 @@ impl DumpFiles<'_> {
             .ok()
     }
 
-    /// The revision the pointer names, if both of its files exist.
+    /// The revision the pointer names, if its graph and data exist.
     fn published(&self) -> Option<String> {
         let revision = std::fs::read_to_string(self.pointer())
             .ok()?
             .trim()
             .to_string();
         self.revision(&revision)?;
-        self.pair(&revision)
+        self.revision_files(&revision)[..2]
             .iter()
             .all(|file| file.is_file())
             .then_some(revision)
@@ -436,13 +454,15 @@ impl DumpFiles<'_> {
             .unwrap_or_else(|| self.basename.to_string())
     }
 
-    /// Writes the next revision with `dump`, publishes it, then deletes every other pair of this basename. The whole
-    /// transaction holds `<basename>.hnsw.lock` exclusively, so saves through other handles and other processes wait.
+    /// Writes the next revision, graph and data with `dump` plus `deleted_ids`, publishes it, then deletes every other
+    /// revision of this basename. The whole transaction holds `<basename>.hnsw.lock` exclusively, so saves through other
+    /// handles and other processes wait.
     fn publish(
         &self,
         dump: impl FnOnce(&Path, &str) -> Result<String, String>,
+        deleted_ids: &[u64],
     ) -> Result<(), HnswError> {
-        self.publish_with(dump, |_| false)
+        self.publish_with(dump, deleted_ids, |_| false)
     }
 
     /// `publish`, calling `at` before each step; `at` returning true abandons the save there as if the process were
@@ -450,10 +470,14 @@ impl DumpFiles<'_> {
     fn publish_with(
         &self,
         dump: impl FnOnce(&Path, &str) -> Result<String, String>,
+        deleted_ids: &[u64],
         at: impl Fn(PublishStep) -> bool,
     ) -> Result<(), HnswError> {
         let _publishing = self
             .lock(Lock::Exclusive)
+            .and_then(|file| {
+                file.ok_or_else(|| std::io::Error::other("the lock file can't be created"))
+            })
             .map_err(|error| HnswError::DumpError(format!("could not lock the dump: {error}")))?;
         let killed =
             |step| at(step).then(|| HnswError::DumpError(format!("killed before {step:?}")));
@@ -463,10 +487,21 @@ impl DumpFiles<'_> {
         }));
         let committed = match written {
             Ok(Ok(name)) if name == revision => {
-                if let Some(error) = killed(PublishStep::SyncPair) {
-                    return Err(error);
+                #[cfg(test)]
+                if tests::tombstone_hook() {
+                    return Err(HnswError::DumpError(
+                        "killed before the tombstones".to_string(),
+                    ));
                 }
-                self.commit(&revision, killed)
+                match write_tombstones(&self.tombstones(&revision), deleted_ids) {
+                    Err(error) => Err(error.to_string().into()),
+                    Ok(()) => {
+                        if let Some(error) = killed(PublishStep::SyncPair) {
+                            return Err(error);
+                        }
+                        self.commit(&revision, killed)
+                    }
+                }
             }
             Ok(Ok(name)) => Err(format!("the dump was written as {name}, not {revision}").into()),
             Ok(Err(error)) => Err(error.into()),
@@ -476,7 +511,7 @@ impl DumpFiles<'_> {
             Ok(()) => {}
             Err(Publication::Killed(error)) => return Err(error),
             Err(Publication::Failed(message)) => {
-                for file in self.pair(&revision) {
+                for file in self.revision_files(&revision) {
                     let _ = std::fs::remove_file(file);
                 }
                 let _ = std::fs::remove_file(self.pointer_draft());
@@ -495,23 +530,34 @@ impl DumpFiles<'_> {
         Ok(())
     }
 
-    /// Opens `<basename>.hnsw.lock` and locks it. Each open is its own lock, so handles in one process exclude each other
-    /// as handles in different processes do. A shared lock in a directory where the lock file can't be created is
-    /// skipped by the caller.
-    fn lock(&self, kind: Lock) -> std::io::Result<std::fs::File> {
+    /// Opens `<basename>.hnsw.lock` and locks it, retrying a lock call that a signal interrupted. Each open is its own
+    /// lock, so handles in one process exclude each other as handles in different processes do. `None` only for a
+    /// shared lock in a directory where the lock file neither exists nor can be created, such as a read-only copy of
+    /// a dump: there is no writer to wait for there. Any other failure is an error, so no dump file is read unlocked.
+    fn lock(&self, kind: Lock) -> std::io::Result<Option<std::fs::File>> {
         let path = self.file(&format!("{}.hnsw.lock", self.basename));
-        let file = std::fs::OpenOptions::new()
+        let opened = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(&path)
-            .or_else(|error| match kind {
-                Lock::Shared => std::fs::File::open(&path),
-                Lock::Exclusive => Err(error),
-            })?;
-        acquire(&file, kind)?;
-        Ok(file)
+            .open(&path);
+        let file = match (opened, kind) {
+            (Ok(file), _) => file,
+            (Err(error), Lock::Exclusive) => return Err(error),
+            (Err(_), Lock::Shared) => match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            },
+        };
+        loop {
+            match acquire(&file, kind) {
+                Ok(()) => return Ok(Some(file)),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// The highest revision number any file of this basename uses, so a new revision never reuses a name.
@@ -524,7 +570,7 @@ impl DumpFiles<'_> {
             .flatten()
             .filter_map(|entry| {
                 let name = entry.ok()?.file_name().into_string().ok()?;
-                Self::SUFFIXES
+                Self::REVISION_SUFFIXES
                     .iter()
                     .find_map(|suffix| name.strip_suffix(suffix))
                     .and_then(|basename| self.revision(basename))
@@ -549,7 +595,7 @@ impl DumpFiles<'_> {
     ) -> Result<(), Publication> {
         use std::io::Write;
         let fail = |error: std::io::Error| Publication::Failed(error.to_string());
-        for file in self.pair(revision) {
+        for file in self.revision_files(revision) {
             std::fs::File::open(file)
                 .and_then(|file| file.sync_all())
                 .map_err(fail)?;
@@ -568,7 +614,8 @@ impl DumpFiles<'_> {
         std::fs::rename(self.pointer_draft(), self.pointer()).map_err(fail)
     }
 
-    /// Deletes this basename's pairs other than `revision` and the one the pointer names: earlier revisions, the pair written before revisions, and the
+    /// Deletes this basename's files other than `revision`'s and those of the one the pointer names: earlier revisions
+    /// with their deleted ids, the pair and `<basename>.deleted` written before revisions, and the
     /// `<basename>-<n>` copies that hnsw_rs wrote when it refused to overwrite a loaded graph's dump.
     fn remove_all_but(&self, revision: &str) {
         let published = self.published();
@@ -582,7 +629,7 @@ impl DumpFiles<'_> {
             return;
         };
         for name in entries.filter_map(|entry| entry.ok()?.file_name().into_string().ok()) {
-            let Some(pair) = Self::SUFFIXES
+            let Some(pair) = Self::REVISION_SUFFIXES
                 .iter()
                 .find_map(|suffix| name.strip_prefix(self.basename)?.strip_suffix(suffix))
             else {
@@ -632,9 +679,7 @@ impl HnswIndex {
     ) -> Result<Self, HnswError> {
         let dimension = config.dimension;
         let distance = config.distance;
-        let inner = HnswIndexInner::load(directory.clone(), basename.clone(), distance)?;
-        let loaded_deleted_ids =
-            read_tombstones(&Path::new(&directory).join(format!("{basename}.deleted")));
+        let (inner, loaded_deleted_ids) = HnswIndexInner::load(directory, basename, distance)?;
         Ok(Self {
             inner: Mutex::new(inner),
             dimension,
@@ -748,25 +793,13 @@ impl HnswIndex {
         self.dimension
     }
 
+    /// Saves the graph with the deleted ids it was loaded with.
     #[uniffi::method]
     pub fn save(&self, directory: String, basename: String) -> Result<(), HnswError> {
-        let guard = self.inner.lock().map_err(|_| HnswError::LockError)?;
-        let files = DumpFiles {
-            directory: Path::new(&directory),
-            basename: &basename,
-        };
-        files.publish(|directory, revision| {
-            match &*guard {
-                HnswIndexInner::L2(inner) => inner.hnsw.file_dump(directory, revision),
-                HnswIndexInner::Cosine(inner) => inner.hnsw.file_dump(directory, revision),
-                HnswIndexInner::Dot(inner) => inner.hnsw.file_dump(directory, revision),
-                HnswIndexInner::L1(inner) => inner.hnsw.file_dump(directory, revision),
-            }
-            .map_err(|error| error.to_string())
-        })
+        self.save_with_deleted_ids(directory, basename, self.loaded_deleted_ids.clone())
     }
 
-    /// Saves the graph with the ids the caller has deleted, read back by `loaded_deleted_ids` after a load.
+    /// Saves the graph with the ids the caller has deleted, as one revision: a load reads both or neither.
     #[uniffi::method]
     pub fn save_with_deleted_ids(
         &self,
@@ -774,21 +807,26 @@ impl HnswIndex {
         basename: String,
         deleted_ids: Vec<u64>,
     ) -> Result<(), HnswError> {
-        self.save(directory.clone(), basename.clone())?;
-        #[cfg(test)]
-        if tests::tombstone_hook() {
-            return Err(HnswError::DumpError(
-                "killed before the tombstones".to_string(),
-            ));
-        }
-        write_tombstones(
-            &Path::new(&directory).join(format!("{basename}.deleted")),
+        let guard = self.inner.lock().map_err(|_| HnswError::LockError)?;
+        let files = DumpFiles {
+            directory: Path::new(&directory),
+            basename: &basename,
+        };
+        files.publish(
+            |directory, revision| {
+                match &*guard {
+                    HnswIndexInner::L2(inner) => inner.hnsw.file_dump(directory, revision),
+                    HnswIndexInner::Cosine(inner) => inner.hnsw.file_dump(directory, revision),
+                    HnswIndexInner::Dot(inner) => inner.hnsw.file_dump(directory, revision),
+                    HnswIndexInner::L1(inner) => inner.hnsw.file_dump(directory, revision),
+                }
+                .map_err(|error| error.to_string())
+            },
             &deleted_ids,
         )
-        .map_err(|error| HnswError::DumpError(error.to_string()))
     }
 
-    /// The deleted ids saved with the dump this index was loaded from.
+    /// The deleted ids saved in the same revision as the graph this index was loaded from.
     #[uniffi::method]
     pub fn loaded_deleted_ids(&self) -> Vec<u64> {
         self.loaded_deleted_ids.clone()
@@ -1398,6 +1436,7 @@ mod tests {
                         .map_err(|e| e.to_string()),
                     _ => unreachable!(),
                 },
+                &[],
                 |at| at == step,
             );
             assert!(abandoned.is_err(), "{step:?}");
@@ -1457,7 +1496,8 @@ mod tests {
         };
         assert!(
             files
-                .publish_with(cosine_dump(&first), |at| at == PublishStep::RemoveOthers)
+                .publish_with(cosine_dump(&first), &[], |at| at
+                    == PublishStep::RemoveOthers)
                 .is_err()
         );
         assert_eq!(files.published().as_deref(), Some("hnsw.r2"));
@@ -1538,7 +1578,7 @@ mod tests {
                     directory: &directory,
                     basename: "hnsw",
                 }
-                .publish_with(cosine_dump(&first), |at| {
+                .publish_with(cosine_dump(&first), &[], |at| {
                     if at == PublishStep::RemoveOthers {
                         paused_tx.send(()).unwrap();
                         resume_rx.lock().unwrap().recv().unwrap();
@@ -1759,7 +1799,7 @@ mod tests {
                     directory: &directory,
                     basename: "hnsw",
                 }
-                .publish_with(cosine_dump(&writer), |at| {
+                .publish_with(cosine_dump(&writer), &[], |at| {
                     if at == PublishStep::RenamePointer {
                         paused_tx.send(()).unwrap();
                         resume_rx.lock().unwrap().recv().unwrap();
@@ -1813,6 +1853,80 @@ mod tests {
         set_mode(&directory, 0o755);
         assert_eq!(loaded.unwrap().len().unwrap(), 40);
         assert!(!directory.join("hnsw.hnsw.lock").exists());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A dump written before revisions: the `hnsw.hnsw.*` pair and the `hnsw.deleted` HnswSwift wrote beside it.
+    #[test]
+    fn a_dump_from_before_revisions_keeps_its_tombstones_through_the_first_save() {
+        let directory = scratch("legacy-tombstones");
+        let path = directory.to_string_lossy().into_owned();
+        let config = cosine_config(32);
+        let old = HnswIndex::new(config);
+        for id in [10, 20, 30] {
+            old.insert(point(id), id).unwrap();
+        }
+        match &*old.inner.lock().unwrap() {
+            HnswIndexInner::Cosine(inner) => inner.hnsw.file_dump(&directory, "hnsw").unwrap(),
+            _ => unreachable!(),
+        };
+        std::fs::write(directory.join("hnsw.deleted"), 20u64.to_le_bytes()).unwrap();
+
+        let loaded = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        assert_eq!(loaded.loaded_deleted_ids(), [20]);
+        assert_eq!(visible(&path, config), [10, 30]);
+        loaded
+            .save_with_deleted_ids(path.clone(), "hnsw".into(), loaded.loaded_deleted_ids())
+            .unwrap();
+
+        assert_eq!(visible(&path, config), [10, 30]);
+        assert!(
+            !directory.join("hnsw.deleted").exists(),
+            "the pre-revision tombstones go once a revision is published"
+        );
+        assert!(!directory.join("hnsw.hnsw.graph").exists());
+        assert_eq!(read_tombstones(&directory.join("hnsw.r1.deleted")), [20]);
+        loaded
+            .save_with_deleted_ids(path.clone(), "hnsw".into(), vec![20])
+            .unwrap();
+        assert!(
+            !directory.join("hnsw.r1.deleted").exists(),
+            "an earlier revision's tombstones go with it"
+        );
+        assert_eq!(visible(&path, config), [10, 30]);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A plain `save`, through the FFI without HnswSwift, must not drop the deleted ids the index was loaded with.
+    #[test]
+    fn a_plain_save_keeps_the_deleted_ids_it_was_loaded_with() {
+        let (directory, path, config, edited) = edited_after_save("plain-save");
+        edited
+            .save_with_deleted_ids(path.clone(), "hnsw".into(), vec![10])
+            .unwrap();
+        HnswIndex::load(path.clone(), "hnsw".into(), config)
+            .unwrap()
+            .save(path.clone(), "hnsw".into())
+            .unwrap();
+        assert_eq!(visible(&path, config), [20, 30]);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// An earlier 0.2.4 build published revisions without their own deleted ids and kept HnswSwift's `hnsw.deleted`.
+    #[test]
+    fn a_revision_published_without_its_deleted_ids_reads_the_legacy_ones() {
+        let (directory, path, config, edited) = edited_after_save("interim-layout");
+        edited
+            .save_with_deleted_ids(path.clone(), "hnsw".into(), vec![])
+            .unwrap();
+        std::fs::remove_file(directory.join("hnsw.r2.deleted")).unwrap();
+        std::fs::write(directory.join("hnsw.deleted"), 10u64.to_le_bytes()).unwrap();
+        let loaded = HnswIndex::load(path.clone(), "hnsw".into(), config).unwrap();
+        assert_eq!(loaded.loaded_deleted_ids(), [10]);
+        loaded.save(path.clone(), "hnsw".into()).unwrap();
+        assert_eq!(read_tombstones(&directory.join("hnsw.r3.deleted")), [10]);
+        assert!(!directory.join("hnsw.deleted").exists());
+        assert_eq!(visible(&path, config), [20, 30]);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }

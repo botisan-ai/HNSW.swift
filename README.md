@@ -117,6 +117,16 @@ let loadedIndex = try HnswIndex.load(
 let results = try await loadedIndex.search(query: queryVector, k: 5, efSearch: 50)
 ```
 
+Each save writes a new revision, `my_index.r<n>.hnsw.graph`, `my_index.r<n>.hnsw.data` and its deleted IDs in
+`my_index.r<n>.deleted`, flushes it, then publishes it by renaming `my_index.hnsw.current`. A save that fails or is killed
+leaves the previous revision loadable, with the graph and deleted IDs of the same save. Saves and loads of one basename
+take `my_index.hnsw.lock` (exclusive for a save, shared for a load), across handles and processes. Dumps written by 0.2.3
+and earlier (`my_index.hnsw.{graph,data}` with `my_index.deleted`) load as before, and the first save moves them into a
+revision.
+
+`HnswIndex.load` is synchronous and blocks, with no timeout, while a save of the same basename holds the lock. Call it
+off the main thread (for example from a detached task or a background actor) when a save may be running.
+
 ### Complete Example
 
 ```swift

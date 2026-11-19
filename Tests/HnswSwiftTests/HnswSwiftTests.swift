@@ -265,3 +265,25 @@ import Testing
     let reloaded = try HnswIndex.load(directory: testDir.path, basename: "test_index", dimension: 4, distanceType: .cosine)
     #expect(try await reloaded.search(query: [0.0, 0.0, 1.0, 0.0], k: 1).first?.id == 300)
 }
+
+@Test func testDeletedIdsAreSavedInTheRevisionTheyBelongTo() async throws {
+    let testDir = FileManager.default.temporaryDirectory.appendingPathComponent("hnsw_tombstones_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: testDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: testDir) }
+
+    let index = HnswIndex(maxConnections: 16, maxElements: 1000, maxLayers: 16, efConstruction: 200, dimension: 4, distanceType: .cosine)
+    try await index.insert(vector: [1.0, 0.0, 0.0, 0.0], id: 100)
+    try await index.insert(vector: [0.0, 1.0, 0.0, 0.0], id: 200)
+    await index.delete(id: 200)
+    try await index.save(directory: testDir.path, basename: "test_index")
+
+    let loaded = try HnswIndex.load(directory: testDir.path, basename: "test_index", dimension: 4, distanceType: .cosine)
+    #expect(try await loaded.count() == 1)
+    #expect(try await loaded.search(query: [0.0, 1.0, 0.0, 0.0], k: 2).map(\.id) == [100])
+    try await loaded.save(directory: testDir.path, basename: "test_index")
+
+    let files = try FileManager.default.contentsOfDirectory(atPath: testDir.path).sorted()
+    #expect(files == ["test_index.hnsw.current", "test_index.hnsw.lock", "test_index.r2.deleted", "test_index.r2.hnsw.data", "test_index.r2.hnsw.graph"])
+    let reloaded = try HnswIndex.load(directory: testDir.path, basename: "test_index", dimension: 4, distanceType: .cosine)
+    #expect(try await reloaded.search(query: [0.0, 1.0, 0.0, 0.0], k: 2).map(\.id) == [100])
+}
