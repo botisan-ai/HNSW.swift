@@ -547,14 +547,17 @@ public protocol HnswIndexProtocol: AnyObject, Sendable {
     func len() throws  -> UInt64
     
     /**
-     * The deleted ids saved with the dump this index was loaded from.
+     * The deleted ids saved in the same revision as the graph this index was loaded from.
      */
     func loadedDeletedIds()  -> [UInt64]
     
+    /**
+     * Saves the graph with the deleted ids it was loaded with.
+     */
     func save(directory: String, basename: String) throws 
     
     /**
-     * Saves the graph with the ids the caller has deleted, read back by `loaded_deleted_ids` after a load.
+     * Saves the graph with the ids the caller has deleted, as one revision: a load reads both or neither.
      */
     func saveWithDeletedIds(directory: String, basename: String, deletedIds: [UInt64]) throws 
     
@@ -682,7 +685,7 @@ open func len()throws  -> UInt64  {
 }
     
     /**
-     * The deleted ids saved with the dump this index was loaded from.
+     * The deleted ids saved in the same revision as the graph this index was loaded from.
      */
 open func loadedDeletedIds() -> [UInt64]  {
     return try!  FfiConverterSequenceUInt64.lift(try! rustCall() {
@@ -692,6 +695,9 @@ open func loadedDeletedIds() -> [UInt64]  {
 })
 }
     
+    /**
+     * Saves the graph with the deleted ids it was loaded with.
+     */
 open func save(directory: String, basename: String)throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
     uniffi_hnsw_fn_method_hnswindex_save(
             self.uniffiCloneHandle(),
@@ -702,7 +708,7 @@ open func save(directory: String, basename: String)throws   {try rustCallWithErr
 }
     
     /**
-     * Saves the graph with the ids the caller has deleted, read back by `loaded_deleted_ids` after a load.
+     * Saves the graph with the ids the caller has deleted, as one revision: a load reads both or neither.
      */
 open func saveWithDeletedIds(directory: String, basename: String, deletedIds: [UInt64])throws   {try rustCallWithError(FfiConverterTypeHnswError_lift) {
     uniffi_hnsw_fn_method_hnswindex_save_with_deleted_ids(
@@ -1232,13 +1238,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_hnsw_checksum_method_hnswindex_len() != 807) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindex_loaded_deleted_ids() != 38279) {
+    if (uniffi_hnsw_checksum_method_hnswindex_loaded_deleted_ids() != 42074) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindex_save() != 38703) {
+    if (uniffi_hnsw_checksum_method_hnswindex_save() != 58140) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_hnsw_checksum_method_hnswindex_save_with_deleted_ids() != 64652) {
+    if (uniffi_hnsw_checksum_method_hnswindex_save_with_deleted_ids() != 49433) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hnsw_checksum_method_hnswindex_search() != 8428) {
